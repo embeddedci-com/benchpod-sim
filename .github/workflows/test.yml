@@ -1,0 +1,26 @@
+# The simulator's own tests, and the MCP end-to-end test against the released MCP server.
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Install the BenchPod MCP server
+        run: |
+          python3 -m venv "$RUNNER_TEMP/mcp"
+          "$RUNNER_TEMP/mcp/bin/pip" install --quiet embeddedci-mcp
+          echo "BENCHPOD_MCP_COMMAND=$RUNNER_TEMP/mcp/bin/embeddedci-mcp" >> "$GITHUB_ENV"
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
