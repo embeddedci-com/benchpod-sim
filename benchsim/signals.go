@@ -7,7 +7,7 @@ import (
 
 // The LA lines keep a short history so a capture, a trigger or a decode sees what happened on
 // the wire. A line's level is its idle level (base: power, pin modes, the alarm output, the pod's
-// drivers) with protocol activity on top: UART frames on the DUT's TX and the pod's TX, I2C
+// drivers) with protocol activity on top: UART frames on the DUT's TX, the pod's TX and an emulated UART sensor's TX, I2C
 // transfers on the sensor bus, and short strobe pulses. Everything is time-stamped in
 // simulation nanoseconds and pruned after historyNs, and every list is capped, so a long-lived
 // visitor costs a few hundred KB at most.
@@ -150,6 +150,7 @@ type signals struct {
 	pulses []pulse
 	dutTx  byteStream
 	podTx  byteStream
+	senTx  byteStream // an emulated UART sensor
 	i2c    []i2cTxn
 	busEnd int64
 }
@@ -216,6 +217,7 @@ func (g *signals) prune(now int64) {
 	}
 	g.dutTx.prune(before)
 	g.podTx.prune(before)
+	g.senTx.prune(before)
 }
 
 func (g *signals) baseAt(t int64) uint16 {
@@ -273,7 +275,7 @@ func (g *signals) events(t0, t1 int64, mask uint16) (uint16, []edgeEv) {
 			add(p.end, p.ch, 0)
 		}
 	}
-	for _, st := range []*byteStream{&g.dutTx, &g.podTx} {
+	for _, st := range []*byteStream{&g.dutTx, &g.podTx, &g.senTx} {
 		for ci := range st.chunks {
 			c := &st.chunks[ci]
 			if c.end() < lb || c.start > t1 || mask&(1<<(c.ch-1)) == 0 {

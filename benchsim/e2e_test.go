@@ -97,24 +97,28 @@ func TestMCPEndToEnd(t *testing.T) {
 
 	// Story 2: "why does it say sensor error?": no emulated sensor; a BME280 is the wrong part
 	// for this firmware (chip id 0x60), a BMP280 works.
-	expect(call("i2c_sensor_status", nil), `"active":\s*false`)
-	expect(call("i2c_sensor_types", nil), `bme280`)
-	call("enable_i2c_sensor", map[string]any{"sensor": "bme280"})
+	expect(call("sensor_status", nil), `"instances":\s*\[\]`)
+	expect(call("sensor_library", nil), `"bmp280"`)
+	expect(call("sensor_show", map[string]any{"name": "bmp280"}), `temperature_c`)
+	call("set_pull", map[string]any{"las": []any{1, 2}, "enabled": true})
+	call("pull_status", nil)
+	call("sensor_start", map[string]any{"definition": "bme280", "instance": "env"})
 	expect(call("power_cycle_and_capture", map[string]any{"until_regex": "APP_OK"}), `chip id 0x60, not 0x58`)
-	call("enable_i2c_sensor", map[string]any{"sensor": "bmp280", "temperature_c": 24})
+	expect(call("sensor_start", map[string]any{"definition": "bmp280", "instance": "env", "values": map[string]any{"temperature_c": 24}}), `"slot":\s*"i2c0"`)
 	boot = call("power_cycle_and_capture", map[string]any{"until_regex": "APP_OK"})
 	expect(boot, `ENV: bmp280 ok addr=0x76`)
-	expect(call("i2c_sensor_status", nil), `"transactions":\s*[1-9]`)
+	expect(call("sensor_status", nil), `"writes":\s*[1-9]`)
+	expect(call("sensor_regs", map[string]any{"instance": "env", "start": 0xD0, "length": 1}), `"bytes":\s*\[\s*88\s*\]`)
 
 	// Story 3: the console: readings, then an over-temperature alarm from the emulated sensor.
 	call("uart_open", nil)
 	call("uart_write", map[string]any{"text": "alarm"})
 	expect(call("uart_read", map[string]any{"until_regex": `ALARM .*press_pa=\d+ events=\d+`, "timeout": 3}), `env=ok env_c=24\.0`)
-	call("set_i2c_sensor", map[string]any{"temperature_c": 55})
+	call("sensor_set", map[string]any{"instance": "env", "values": map[string]any{"temperature_c": 55}})
 	expect(call("uart_read", map[string]any{"until_regex": "EVT alarm set=overtemp", "timeout": 3}), `"matched":\s*true`)
 	expect(call("gpio_read", map[string]any{"la": []any{"ALARM"}}), `"level":\s*1`)
 	call("la_pins", nil)
-	call("set_i2c_sensor", map[string]any{"temperature_c": 30})
+	call("sensor_set", map[string]any{"instance": "env", "values": map[string]any{"temperature_c": 30}})
 	expect(call("uart_read", map[string]any{"until_regex": "EVT alarm clear=overtemp", "timeout": 3}), `"matched":\s*true`)
 
 	// Story 4: "set the room temperature to 30 degC and see if the thermostat turns the heater
@@ -134,7 +138,10 @@ func TestMCPEndToEnd(t *testing.T) {
 	// Story 5: "capture the I2C bus".
 	call("capture_la", map[string]any{"samples": 20000, "sample_rate_hz": 1e6, "trigger_la": "i2c_sda", "trigger_edge": "falling"})
 	expect(call("decode_la", map[string]any{"protocol": "i2c", "sda": 2, "scl": 1}), `0x76`)
-	expect(call("i2c_sensor_capture", map[string]any{"samples": 4096, "address": 0x76, "register": 0xF7}), `"addressed":\s*true`)
+	// sensor_capture sends no sample rate, so the pod captures at its highest rate: 16384
+	// samples at 24 MHz are 0.68 ms, shorter than one of the node's 0.9 ms reads, as on a real
+	// pod. It answers; the decode needs a whole transfer.
+	expect(call("sensor_capture", map[string]any{"instance": "env", "samples": 4096, "address": 0x76, "register": 0xF7}), `"transactions":`)
 
 	// The boot log on the logic analyzer: power on 0.5 s out, trigger on the first start bit.
 	call("power_off", nil)
@@ -151,7 +158,7 @@ func TestMCPEndToEnd(t *testing.T) {
 	expect(call("capture_uart", map[string]any{"duration": 2.0, "until_regex": "APP_OK"}), `reset=pin`)
 	call("generate", map[string]any{"waveform": "sine", "freq_hz": 50, "amplitude": 0.5, "offset": 1.5})
 	call("dac_stop", nil)
-	call("disable_i2c_sensor", nil)
+	expect(call("sensor_stop", nil), `"env"`)
 	call("power_off", nil)
 
 	if len(sim.Log()) == 0 {

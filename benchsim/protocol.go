@@ -151,29 +151,35 @@ func notInDemo(cmd string) error {
 // simpleHandlers answer with one reply line. Streaming and mode-switching commands are handled
 // in dispatch itself.
 var simpleHandlers = map[string]func(s *Sim, r request) (any, error){
-	"ping":          func(*Sim, request) (any, error) { return "pong", nil },
-	"status":        (*Sim).cmdStatus,
-	"la_voltage":    (*Sim).cmdLaVoltage,
-	"cloud_status":  func(*Sim, request) (any, error) { return map[string]any{"configured": false, "state": "off"}, nil },
-	"lease_state":   func(*Sim, request) (any, error) { return map[string]any{"held": false}, nil },
-	"target_power":  (*Sim).cmdTargetPower,
-	"target_status": (*Sim).cmdTargetStatus,
-	"power_status":  (*Sim).cmdPowerStatus,
-	"nrst":          (*Sim).cmdNrst,
-	"usb_cc":        (*Sim).cmdUsbCc,
-	"la":            (*Sim).cmdLa,
-	"la_pins":       (*Sim).cmdLaPins,
-	"gpio":          (*Sim).cmdGpio,
-	"sensor_start":  (*Sim).cmdSensorStart,
-	"sensor_set":    (*Sim).cmdSensorSet,
-	"sensor_stop":   (*Sim).cmdSensorStop,
-	"sensor_status": (*Sim).cmdSensorStatus,
-	"sensor_types":  (*Sim).cmdSensorTypes,
-	"analog_path":   (*Sim).cmdAnalogPath,
-	"dac_out":       (*Sim).cmdDacOut,
-	"adc_read":      (*Sim).cmdAdcRead,
-	"generate":      (*Sim).cmdGenerate,
-	"dac_stop":      (*Sim).cmdDacStop,
+	"ping":                  func(*Sim, request) (any, error) { return "pong", nil },
+	"status":                (*Sim).cmdStatus,
+	"la_voltage":            (*Sim).cmdLaVoltage,
+	"cloud_status":          func(*Sim, request) (any, error) { return map[string]any{"configured": false, "state": "off"}, nil },
+	"lease_state":           func(*Sim, request) (any, error) { return map[string]any{"held": false}, nil },
+	"target_power":          (*Sim).cmdTargetPower,
+	"target_status":         (*Sim).cmdTargetStatus,
+	"power_status":          (*Sim).cmdPowerStatus,
+	"nrst":                  (*Sim).cmdNrst,
+	"usb_cc":                (*Sim).cmdUsbCc,
+	"la":                    (*Sim).cmdLa,
+	"la_pins":               (*Sim).cmdLaPins,
+	"gpio":                  (*Sim).cmdGpio,
+	"sensor_define":         (*Sim).cmdSensorDefine,
+	"sensor_start":          (*Sim).cmdSensorStart,
+	"sensor_set":            (*Sim).cmdSensorSet,
+	"sensor_stop":           (*Sim).cmdSensorStop,
+	"sensor_status":         (*Sim).cmdSensorStatus,
+	"sensor_regs":           (*Sim).cmdSensorRegs,
+	"sensor_fault":          (*Sim).cmdSensorFault,
+	"sensor_fault_clear":    (*Sim).cmdSensorFaultClear,
+	"sensor_stimulus":       (*Sim).cmdSensorStimulus,
+	"sensor_stimulus_start": (*Sim).cmdSensorStimulusStart,
+	"sensor_stimulus_stop":  (*Sim).cmdSensorStimulusStop,
+	"analog_path":           (*Sim).cmdAnalogPath,
+	"dac_out":               (*Sim).cmdDacOut,
+	"adc_read":              (*Sim).cmdAdcRead,
+	"generate":              (*Sim).cmdGenerate,
+	"dac_stop":              (*Sim).cmdDacStop,
 }
 
 func (s *Sim) dispatch(c *conn, req request) {
@@ -184,6 +190,11 @@ func (s *Sim) dispatch(c *conn, req request) {
 	cmd := req.str("cmd")
 	if cmd == "" {
 		err := fwError("missing cmd")
+		s.logCmd(req, err)
+		_ = c.send(errReply(err.Error()))
+		return
+	}
+	if err := s.analogGuard(cmd); err != nil {
 		s.logCmd(req, err)
 		_ = c.send(errReply(err.Error()))
 		return
@@ -206,8 +217,6 @@ func (s *Sim) dispatch(c *conn, req request) {
 		err = s.cmdLaCapture(c, req)
 	case "sensor_la":
 		err = s.cmdSensorLa(c, req)
-	case "sensor_regs":
-		err = s.cmdSensorRegs(c, req)
 	case "capture":
 		err = s.cmdCapture(c, req)
 	case "capture_dual":
@@ -235,8 +244,8 @@ var knownPodCommands = map[string]bool{
 	"dac_loop_probe": true, "dac_limits": true, "current_out": true, "calibrate": true,
 	"calibration": true, "can_config": true, "can_write": true, "can_read": true,
 	"can_status": true, "can_term": true, "can_respond": true, "can_disable": true,
-	"gps_start": true, "gps_stop": true, "gps_set": true, "gps_status": true, "spi_start": true,
-	"spi_stop": true, "spi_xfer": true, "spi_stream": true, "spi_flash": true, "usb_net": true,
+	"spi_start": true,
+	"spi_stop":  true, "spi_xfer": true, "spi_stream": true, "spi_flash": true, "usb_net": true,
 	"lan_tls": true, "sig_policy": true, "lan_policy": true, "wifi": true, "dac_set": true,
 	"measure": true, "psram_recover": true, "cloud_config": true, "flash_self": true,
 }

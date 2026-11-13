@@ -276,11 +276,11 @@ type envState struct {
 // segs are tried in order; a NACKed address ends the transfer (the HAL sends STOP). It returns
 // the bytes read, whether every part was ACKed, and when the bus is free again.
 func (s *Sim) i2cTransfer(t int64, segs []i2cSeg) (data []byte, ok bool, end int64) {
-	if s.busHeldLow() {
+	if s.busHeldLow(t) {
 		// A line held low: the controller cannot even send START; HAL times out after 10 ms.
 		return nil, false, t + 10*msNs
 	}
-	dev := s.sensorAt(segs[0].addr)
+	dev := s.sensorAt(segs[0].addr, t)
 	ok = true
 	for i := range segs {
 		sg := &segs[i]
@@ -293,13 +293,13 @@ func (s *Sim) i2cTransfer(t int64, segs []i2cSeg) (data []byte, ok bool, end int
 		}
 		sg.ack[0] = true
 		if sg.read {
-			sg.data = dev.read(len(sg.data))
+			sg.data = s.i2cRead(dev, t, len(sg.data))
 			for k := range sg.data {
 				sg.ack[k+1] = k < len(sg.data)-1 // the controller NACKs the last byte
 			}
 			data = append(data, sg.data...)
 		} else {
-			dev.write(sg.data)
+			s.i2cWrite(dev, t, sg.data)
 			for k := range sg.data {
 				sg.ack[k+1] = true
 			}

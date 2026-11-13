@@ -143,7 +143,7 @@ func TestStatusAndLaVoltage(t *testing.T) {
 	if st["version"] != podFirmware || st["board"] != podBoard {
 		t.Fatalf("status: %v", st)
 	}
-	if !strings.Contains(strings.Join(toStrings(st["caps"]), ","), "sensor_types") {
+	if !strings.Contains(strings.Join(toStrings(st["caps"]), ","), "sensors") || st["sensors_format"] != 1.0 {
 		t.Fatalf("caps: %v", st["caps"])
 	}
 	if ok(t, addr, map[string]any{"cmd": "ping"}) != "pong" {
@@ -233,8 +233,12 @@ func atof(s string) float64 {
 func TestSensorAlarmAndPins(t *testing.T) {
 	t.Parallel()
 	_, addr := startSim(t, WithLaVoltage(3300), WithDUTPowered())
-	ok(t, addr, map[string]any{"cmd": "sensor_start", "type": "bmp280", "addr": "0x76", "sda": 2, "scl": 1})
-	ok(t, addr, map[string]any{"cmd": "sensor_set", "temperature_c": 21.5})
+	defineSensor(t, addr, "env", "bmp280")
+	st := ok(t, addr, map[string]any{"cmd": "sensor_start", "instance": "env", "address": "0x76",
+		"pins": map[string]any{"sda": 2, "scl": "LA1"}, "values": map[string]any{"temperature_c": 21.5}}).(map[string]any)
+	if st["slot"] != "i2c0" || st["address"] != "0x76" || st["image"] != "emulation" || st["image_loaded"] != true {
+		t.Fatalf("sensor_start: %v", st)
+	}
 	k := openConsole(t, addr)
 	k.expect(`ENV: bmp280 found at 0x76\r\n`, 2*time.Second)
 	time.Sleep(300 * time.Millisecond)
@@ -243,22 +247,25 @@ func TestSensorAlarmAndPins(t *testing.T) {
 	if !strings.Contains(a, "env=ok env_c=21.5 press_pa=10132") {
 		t.Fatalf("alarm: %q", a)
 	}
-	ok(t, addr, map[string]any{"cmd": "sensor_set", "temperature_c": 60})
+	ok(t, addr, map[string]any{"cmd": "sensor_set", "instance": "env", "values": map[string]any{"temperature_c": 60}})
 	k.expect(`EVT alarm set=overtemp active=0x01\r\n`, 2*time.Second)
 	lv := ok(t, addr, map[string]any{"cmd": "gpio"}).(map[string]any)
 	if int(lv["levels"].(float64))&(1<<(dutAlarm-1)) == 0 {
 		t.Fatalf("the alarm pin (LA5) is not high: %v", lv["levels"])
 	}
-	st := ok(t, addr, map[string]any{"cmd": "sensor_status"}).(map[string]any)
-	if st["transactions"].(float64) < 4 {
-		t.Fatalf("sensor_status: %v", st)
+	inst := ok(t, addr, map[string]any{"cmd": "sensor_status"}).(map[string]any)["instances"].([]any)[0].(map[string]any)
+	bus := inst["bus"].(map[string]any)
+	if bus["writes"].(float64) < 3 || bus["transfers"] != nil || bus["last_write"].(map[string]any)["at"] != "0xF4" {
+		t.Fatalf("sensor_status: %v", inst)
 	}
 	pins := ok(t, addr, map[string]any{"cmd": "la_pins"}).(map[string]any)["pins"].([]any)
-	if f := pins[0].(map[string]any)["function"]; f != "i2c_scl" {
-		t.Fatalf("LA1 function %v", f)
+	if p := pins[0].(map[string]any); p["function"] != "i2c_scl" || p["owner"] != "sensor:env" {
+		t.Fatalf("LA1: %v", p)
 	}
 	// Swapped bus channels: the node no longer finds its sensor.
-	ok(t, addr, map[string]any{"cmd": "sensor_start", "type": "bmp280", "sda": 1, "scl": 2})
+	ok(t, addr, map[string]any{"cmd": "sensor_stop", "instance": "env"})
+	defineSensor(t, addr, "env", "bmp280")
+	ok(t, addr, map[string]any{"cmd": "sensor_start", "instance": "env", "pins": map[string]any{"sda": 1, "scl": 2}})
 	k.expect(`EVT alarm set=env_lost`, 3*time.Second)
 }
 
@@ -347,10 +354,26 @@ func TestPowerProfileAndAdcCapture(t *testing.T) {
 	}
 }
 
+// TestBmp280RoundTrip reads the engine's BMP280 image back with the node's own compensation code.
 func TestBmp280RoundTrip(t *testing.T) {
+	eng, err := engine()
+	if err != nil {
+		t.Fatal(err)
+	}
+	def := testDefinition(t, "bmp280")
 	for _, c := range []float64{-20, 0, 24, 55.5, 85} {
-		var img [256]byte
-		buildBmpImage(&img, false, c, 101325, 0)
+		vals, _ := json.Marshal(map[string]float64{"temperature_c": c, "pressure_pa": 101325})
+		raw, err := eng.Preview(def, vals, nil, 0, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var pv struct {
+			Image []byte `json:"image_b64"`
+		}
+		if err := json.Unmarshal(raw, &pv); err != nil || len(pv.Image) != 256 {
+			t.Fatalf("preview: %s %v", raw, err)
+		}
+		img := pv.Image
 		cal := parseBmpCalib(img[0x88:0xA0])
 		adcT := int32(uint32(img[0xFA])<<12 | uint32(img[0xFB])<<4 | uint32(img[0xFC])>>4)
 		adcP := int32(uint32(img[0xF7])<<12 | uint32(img[0xF8])<<4 | uint32(img[0xF9])>>4)

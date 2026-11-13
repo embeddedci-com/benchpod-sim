@@ -8,9 +8,9 @@ import (
 
 // What the simulated pod reports about itself: a rev3 analog BenchPod on current firmware.
 const (
-	podFirmware = "3.9.4"
+	podFirmware = "3.10.3"
 	podBoard    = "stm32h563"
-	podGateware = 48
+	podGateware = 54
 	// The front-SMA ADC fit (cal_data.h ADC_CAL_EXT): volts = a + b*count, 16-bit unwrapped.
 	adcCalA = 65.708158
 	adcCalB = -0.0010026443
@@ -18,10 +18,10 @@ const (
 
 // podCaps is the caps[] list of status: the features the simulator implements. The SDK turns a
 // missing flag into a clear "needs newer pod firmware" refusal, so leaving out what is not
-// simulated (CAN, GPS, SPI, OTA, calibration, the 4-20 mA output) fails cleanly on the host.
+// simulated (CAN, SPI, OTA, calibration, the 4-20 mA output) fails cleanly on the host.
 var podCaps = []string{
 	"scope", "la", "uart", "analog", "command", "dac", "dac_dc", "generate16", "la_pins",
-	"gpio_read", "capture_trigger", "power_profile", "capture_b64", "nrst_pin", "sensor_types",
+	"gpio_read", "capture_trigger", "power_profile", "capture_b64", "nrst_pin", "sensors",
 	"pod_current",
 }
 
@@ -42,7 +42,7 @@ type podState struct {
 	nrst    bool // the pod holds the DUT in reset
 	pulls   uint16
 	pins    [15]laPin
-	sensor  *emuSensor
+	sensors podSensors
 	proxy   *uartProxy
 	capture bool // a capture is running (the pod runs one at a time)
 	analog  analogState
@@ -52,7 +52,7 @@ type podState struct {
 	lease            leaseState
 	heavy            *conn // owner of the capture hardware (heavy_owner)
 	otaBusy          bool
-	image            int // running gateware image: 0 loop, 1 deep replay
+	image            int // running gateware image: 0 loop, 1 deep replay, 2 emulation
 	load             *loadBin
 	trace            []uint16 // the last upload, what replay plays
 	tracePsram       bool
@@ -63,7 +63,6 @@ type podState struct {
 	lastCap          *lastCapture
 	can              podCan
 	spi              *spiMaster
-	gps              *gpsState
 }
 
 type leaseState struct {
@@ -115,6 +114,7 @@ func (s *Sim) advance(t int64) {
 		break
 	}
 	s.dutAdvance(t)
+	s.sensorsAdvance(t)
 	s.sig.prune(t)
 	s.loopAdvance(t)
 }
@@ -151,7 +151,7 @@ func (s *Sim) cmdStatus(request) (any, error) {
 		"lease":    map[string]any{"held": false, "holder": "", "left_s": 0},
 		"gateware": podGateware, "gateware_embedded": podGateware,
 		"uptime_ms": s.now() / 1e6, "reset": "power-on", "last_crash": "none", "safe_mode": false,
-		"caps":      podCaps,
+		"caps": podCaps, "sensors_format": 1, "sensors_digital": true,
 		"simulator": "benchsim: a simulated BenchPod wired to a simulated NUCLEO-F446RE process node",
 	}, nil
 }
@@ -167,7 +167,7 @@ func (s *Sim) cmdLaVoltage(r request) (any, error) {
 		if mv != s.pod.laMV && s.pod.laMV != 0 {
 			for la := 1; la <= 14; la++ {
 				if fn := s.pod.pins[la].fn; fn != "none" && fn != "gpio" {
-					return nil, errf("la voltage change refused: LA%d is in use by %s; %s", la, fn, releaseHint(fn, la))
+					return nil, errf("la voltage change refused: LA%d is in use by %s; %s", la, s.pinOwnerText(la), s.releaseHint(la))
 				}
 			}
 		}

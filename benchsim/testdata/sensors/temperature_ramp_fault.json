@@ -1,0 +1,44 @@
+{
+  "format": 1,
+  "kind": "stimulus",
+  "name": "temperature_ramp_fault",
+  "label": "Temperature ramp with a stuck reading",
+  "description": "Room temperature, a ramp to 60 °C, a hold and a slow cool-down. From 50 s to 60 s the sensor\nfreezes on its reading (a stuck sensor), from 120 s to 123 s it stops answering. Drives\n`temperature_c` of any temperature sensor (tmp117, sht3x, sht4x, bme280, ntc_10k_divider ...).\n",
+  "signals": {
+    "temperature_c": [
+      {
+        "shape": "hold",
+        "value": 22,
+        "duration_s": 10
+      },
+      {
+        "shape": "ramp",
+        "end": 60,
+        "duration_s": 60
+      },
+      {
+        "shape": "hold",
+        "value": 60,
+        "duration_s": 30
+      },
+      {
+        "shape": "ramp",
+        "end": 22,
+        "duration_s": 50
+      }
+    ]
+  },
+  "faults": [
+    {
+      "at_s": 50,
+      "duration_s": 10,
+      "type": "stuck"
+    },
+    {
+      "at_s": 120,
+      "duration_s": 3,
+      "type": "no_response"
+    }
+  ]
+}
+

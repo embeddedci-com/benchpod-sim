@@ -8,7 +8,7 @@ import (
 // laPin is one LA channel's owner, as the firmware's la_pins table keeps it: one function at a
 // time, GPIO mode and commanded level when it is GPIO.
 type laPin struct {
-	fn    string // none, gpio, uart_rx, uart_tx, i2c_sda, i2c_scl
+	fn    string // none, gpio, uart_rx, uart_tx, i2c_sda, i2c_scl, sensor_*, spi_*
 	mode  string // input, output, open_drain (fn == gpio)
 	level int
 }
@@ -19,14 +19,17 @@ var pullOhms = map[int]string{1: "4.7k", 2: "4.7k", 3: "2.2k", 4: "2.2k", 5: "10
 func pullDown(la int) bool { return la == 7 || la == 8 }
 
 // releaseHint is the firmware's "how to free it" text for a pin conflict.
-func releaseHint(fn string, la int) string {
-	switch fn {
+func (s *Sim) releaseHint(la int) string {
+	if on := s.sensorsOn(la); len(on) > 0 {
+		return fmt.Sprintf(`stop the sensor emulation first ({"cmd":"sensor_stop","instance":"%s"})`, on[0].name)
+	}
+	switch fn := s.pod.pins[la].fn; fn {
 	case "gpio":
 		return fmt.Sprintf(`release it with {"cmd":"gpio","la":%d,"mode":"off"}`, la)
 	case "uart_rx", "uart_tx":
 		return "stop the uart proxy first"
-	case "i2c_sda", "i2c_scl":
-		return `stop the sensor emulation first ({"cmd":"sensor_stop"})`
+	case "spi_sck", "spi_mosi", "spi_miso", "spi_cs":
+		return `stop the SPI session first ({"cmd":"spi_stop"})`
 	}
 	return ""
 }
@@ -51,7 +54,7 @@ func (s *Sim) checkClaim(fn string, las []int, replaceable ...string) error {
 			free = free || owner == r
 		}
 		if !free {
-			return errf("pin conflict: LA%d is in use by %s; %s", la, owner, releaseHint(owner, la))
+			return errf("pin conflict: LA%d is in use by %s; %s", la, s.pinOwnerText(la), s.releaseHint(la))
 		}
 		if pullDown(la) && s.pod.pulls&(1<<(la-1)) != 0 {
 			switch fn {
@@ -78,6 +81,9 @@ func (s *Sim) releaseFn(fns ...string) {
 func (s *Sim) pinEntry(la int) map[string]any {
 	p := s.pod.pins[la]
 	e := map[string]any{"la": la, "function": p.fn, "gpio": nil, "level": nil, "pull": nil}
+	if owner := s.pinOwner(la); owner != "" {
+		e["owner"] = owner
+	}
 	if p.fn == "gpio" {
 		e["gpio"] = p.mode
 		if p.mode != "input" {
@@ -236,7 +242,7 @@ func (s *Sim) cmdLa(r request) (any, error) {
 			}
 			if pullDown(la) {
 				switch fn := s.pod.pins[la].fn; fn {
-				case "uart_rx", "uart_tx", "i2c_sda", "i2c_scl":
+				case "uart_rx", "uart_tx", "i2c_sda", "i2c_scl", "sensor_tx", "sensor_rx":
 					return nil, errf("pull conflict: LA%d is used by %s, which can't work with the 10k pull-down (stop it first)", la, fn)
 				}
 			}
@@ -295,7 +301,11 @@ func (s *Sim) baseWord() uint16 {
 	if p := s.pod.proxy; p != nil {
 		set(p.tx, true) // the pod's UART TX idles high
 	}
+	now := s.now()
 	for la := 1; la <= 14; la++ {
+		if s.sensorHoldsSDA(la, now) {
+			set(la, false)
+		}
 		p := s.pod.pins[la]
 		if p.fn != "gpio" {
 			continue
@@ -316,8 +326,12 @@ func (s *Sim) baseWord() uint16 {
 func (s *Sim) touchBase(t int64) { s.sig.pushBase(t, s.baseWord()) }
 
 // busHeldLow says whether the pod holds SCL or SDA of the DUT's sensor bus low (a GPIO output
-// at 0 on it), which makes every I2C transfer of the node fail.
-func (s *Sim) busHeldLow() bool {
+// at 0 on it, or an emulated sensor's bus_stuck fault), which makes every I2C transfer of the
+// node fail.
+func (s *Sim) busHeldLow(t int64) bool {
+	if s.sensorHoldsSDA(dutSDA, t) {
+		return true
+	}
 	for _, la := range []int{dutSCL, dutSDA} {
 		p := s.pod.pins[la]
 		if p.fn == "gpio" && p.mode != "input" && p.level == 0 {

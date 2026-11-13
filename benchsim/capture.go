@@ -16,7 +16,7 @@ const (
 	maxAdcSamples  = 262_144
 	adcMaxRateHz   = 400e3
 	maxCaptureNs   = int64(10e9)
-	maxSensorLaB   = 65536
+	maxSensorLaB   = 4096
 	edgesPerChunk  = 2048
 	samplesPerChnk = 256
 	maxTriggerNs   = int64(600e9)
@@ -230,7 +230,7 @@ func (s *Sim) cmdLaCapture(c *conn, r request) error {
 	return laFrames(c, edges, n, rate, nil, true)
 }
 
-// cmdSensorLa is the emulated sensor's bus capture: SCL/SDA packed four samples per byte. The
+// cmdSensorLa is an emulated I2C sensor's bus capture: SCL/SDA packed four samples per byte. The
 // simulator starts the window just before the node's next transfer on the bus (within 1.2 s),
 // so a short capture shows a whole transaction instead of an idle bus; a real pod free-runs
 // and only catches one by chance.
@@ -240,14 +240,25 @@ func (s *Sim) cmdSensorLa(c *conn, r request) error {
 		return err
 	}
 	s.mu.Lock()
-	e := s.pod.sensor
+	e, err := s.sensorInstance(r)
+	var scl, sda int
+	if err == nil {
+		switch {
+		case e.kind() != "i2c":
+			err = errf("sensor_la captures I2C sensors only; use la_capture for the pins of %s", e.name)
+		case !e.running:
+			err = errf("%s is not running: sensor_start it first", e.name)
+		default:
+			scl, sda = e.pins["scl"], e.pins["sda"]
+		}
+	}
 	s.mu.Unlock()
-	if e == nil {
-		return fail(fwError("la capture failed"))
+	if err != nil {
+		return fail(err)
 	}
 	bytes := r.int("samples", 256)
 	if bytes <= 0 || bytes > maxSensorLaB {
-		return fail(fwError("samples out of range"))
+		return fail(fwError("samples must be 1..4096"))
 	}
 	mhz, _ := r.num("sample_rate_mhz")
 	rate := laRate(mhz * 1e6)
@@ -292,7 +303,6 @@ func (s *Sim) cmdSensorLa(c *conn, r request) error {
 	}
 	s.mu.Lock()
 	s.advance(s.now())
-	scl, sda := e.scl, e.sda
 	edges := s.sig.renderRLE(t0, n, rate)
 	s.mu.Unlock()
 	out := make([]int, bytes)
@@ -307,6 +317,20 @@ func (s *Sim) cmdSensorLa(c *conn, r request) error {
 		out[i/4] |= pair << ((3 - i%4) * 2)
 	}
 	return sendSamples(c, out, 1024)
+}
+
+// sendSamples writes a sample list the way bulk_begin does: chunks of "data" with "more".
+func sendSamples(c *conn, data []int, per int) error {
+	if len(data) == 0 {
+		return c.send(map[string]any{"status": "ok", "data": []int{}, "more": false})
+	}
+	for i := 0; i < len(data); i += per {
+		j := min(i+per, len(data))
+		if err := c.send(map[string]any{"status": "ok", "data": data[i:j], "more": j < len(data)}); err != nil {
+			return nil
+		}
+	}
+	return nil
 }
 
 // adcChunk is one dense ADC frame: base64url of little-endian uint16 ("enc":"b64") or decimal.
