@@ -190,6 +190,7 @@ func (s *Sim) cmdDacStop(request) (any, error) {
 	defer s.mu.Unlock()
 	now := s.now()
 	s.advance(now)
+	s.sensorsDacStop(now) // the analog sensors on the DAC stop too (they stay defined)
 	s.snapshotAnalog(now)
 	d := &s.pod.analog.dac
 	if !s.firmware {
@@ -420,6 +421,9 @@ func (s *Sim) cmdReplay(c *conn, r request) (any, error) {
 		return nil, err
 	}
 	defer s.heavyRelease(c)
+	if s.pod.tracePsram && s.pod.image == 2 {
+		return nil, s.noLoopErr("deep replay")
+	}
 	if s.pod.tracePsram && s.pod.image != 1 {
 		return nil, fwError("replay failed")
 	}
@@ -451,6 +455,15 @@ func (s *Sim) loopTripped() bool {
 }
 
 const noLoopImage = "control loop not in the running gateware image (switch with {\"cmd\":\"fpga_image\",\"image\":0})"
+
+// noLoopErr is the refusal of the closed loop outside the loop image; the emulation image names
+// the way back.
+func (s *Sim) noLoopErr(what string) error {
+	if s.pod.image == 2 {
+		return errf(`%s is not in the emulation image, which the emulated sensors use: {"cmd":"sensor_stop","all":true} then {"cmd":"fpga_image","image":"loop"}`, what)
+	}
+	return fwError(noLoopImage)
+}
 
 // loopValidate is dac_loop_params_validate on the fields both commands share.
 func loopValidate(src string, step int) error {
@@ -508,7 +521,7 @@ func (s *Sim) cmdControlLoop(c *conn, r request) (any, error) {
 	}
 	defer s.heavyRelease(c)
 	if s.pod.image != 0 {
-		return nil, fwError(noLoopImage)
+		return nil, s.noLoopErr("control loop")
 	}
 	now := s.now()
 	s.advance(now)
@@ -660,7 +673,7 @@ func (s *Sim) cmdLoopInput(c *conn, r request) (any, error) {
 	}
 	defer s.heavyRelease(c)
 	if s.pod.image != 0 {
-		return nil, fwError(noLoopImage)
+		return nil, s.noLoopErr("control loop")
 	}
 	now := s.now()
 	s.advance(now)
@@ -675,6 +688,9 @@ func (s *Sim) cmdLoopProbe(c *conn, _ request) (any, error) {
 		return nil, err
 	}
 	defer s.heavyRelease(c)
+	if s.pod.image == 2 {
+		return nil, s.noLoopErr("control loop")
+	}
 	if s.pod.image != 0 {
 		return nil, fwError("closed-loop DAC not in the running gateware image (switch with {\"cmd\":\"fpga_image\",\"image\":0})")
 	}
@@ -918,25 +934,67 @@ func (s *Sim) capsChanged() {
 	}
 }
 
+// imageReply is fpga_image's reply for the running image.
+func (s *Sim) imageReply() map[string]any {
+	img := s.pod.image
+	return map[string]any{"image": img, "name": imageName(img), "version": podGateware, "features": 1 << img}
+}
+
+// switchImage reconfigures the iCE40 with another image: every engine in the fabric resets.
+// Callers hold s.mu.
+func (s *Sim) switchImage(now int64, img int) {
+	s.snapshotAnalog(now)
+	if s.pod.image == img {
+		return
+	}
+	d := &s.pod.analog.dac
+	*d = dacState{path: d.path, code: d.codeAt(now)}
+	s.pod.image = img
+	s.pod.loopSrc, s.pod.loopIn, s.pod.loopStep = "adc", 0, 0
+	s.pod.lastCap = nil
+	s.pod.spi = nil
+	s.releaseFn("spi_sck", "spi_mosi", "spi_miso", "spi_cs")
+	s.capsChanged()
+}
+
 func (s *Sim) cmdFpgaImage(c *conn, r request) (any, error) {
 	if !r.has("image") {
-		return nil, fwError("image required (0=loop, 1=deep-replay)")
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.imageReply(), nil
 	}
-	img, err := strconv.Atoi(r.str("image"))
-	if err != nil || img < 0 || img > 1 {
-		img = -1
+	img := -1
+	switch v := strings.ToLower(r.str("image")); v {
+	case "0", "loop":
+		img = 0
+	case "1", "deep":
+		img = 1
+	case "2", "emulation":
+		img = 2
 	}
 	s.mu.Lock()
 	if err := s.heavyBegin(c); err != nil {
 		s.mu.Unlock()
 		return nil, err
 	}
+	var digital []string
+	for _, n := range s.pod.sensors.order {
+		if e := s.pod.sensors.inst[n]; e != nil && e.running && e.kind() != "analog" {
+			digital = append(digital, n)
+		}
+	}
 	s.mu.Unlock()
-	if img < 0 {
+	fail := func(err error) (any, error) {
 		s.mu.Lock()
 		s.heavyRelease(c)
 		s.mu.Unlock()
-		return nil, fwError("image out of range (0=loop, 1=deep-replay)")
+		return nil, err
+	}
+	if img < 0 {
+		return fail(fwError("image must be 0 (loop), 1 (deep) or 2 (emulation)"))
+	}
+	if img != 2 && len(digital) > 0 {
+		return fail(errf(`image switch refused: the emulated sensors %s need the emulation image; stop them first ({"cmd":"sensor_stop","all":true})`, strings.Join(digital, ", ")))
 	}
 	// A swap reflashes the config flash; the reset below is what reconfiguring does.
 	time.Sleep(500 * time.Millisecond)
@@ -945,18 +1003,11 @@ func (s *Sim) cmdFpgaImage(c *conn, r request) (any, error) {
 	defer s.heavyRelease(c)
 	now := s.now()
 	s.advance(now)
-	s.snapshotAnalog(now)
-	if s.pod.image != img {
-		d := &s.pod.analog.dac
-		*d = dacState{path: d.path, code: d.codeAt(now)}
-		s.pod.image = img
-		s.pod.loopSrc, s.pod.loopIn, s.pod.loopStep = "adc", 0, 0
-		s.pod.lastCap = nil
-		s.pod.spi = nil
-		s.releaseFn("spi_sck", "spi_mosi", "spi_miso", "spi_cs")
+	if s.pod.image == img {
+		s.capsChanged() // the pod announces its capabilities after every switch
 	}
-	s.capsChanged()
-	return map[string]any{"image": img, "version": podGateware, "features": img + 1}, nil
+	s.switchImage(now, img)
+	return s.imageReply(), nil
 }
 
 func (s *Sim) cmdPsramRecover(request) (any, error) {

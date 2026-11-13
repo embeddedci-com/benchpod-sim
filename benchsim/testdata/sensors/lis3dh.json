@@ -1,0 +1,191 @@
+{
+  "format": 1,
+  "kind": "spi",
+  "name": "lis3dh",
+  "label": "ST LIS3DH: 3-axis accelerometer (SPI)",
+  "description": "Direct reads of the data registers: the output follows the full scale (CTRL_REG4 FS), the\noperating mode (low-power, normal or high-resolution: 8, 10 or 12 bits, left-justified), the\noutput data rate and axis enables (CTRL_REG1: power-down and disabled axes read 0) and the\nbyte order (CTRL_REG4 BLE). SPI mode 3, address bit 7 selects a read, bit 6 auto increment.\n\nFor a DUT that reads through the FIFO, use `lis3dh_fifo`: the pod pops its FIFO on every read\nof OUT_X_L, so one definition cannot serve both ways.\n",
+  "datasheet": "https://www.st.com/en/mems-and-sensors/lis3dh.html",
+  "version": "1.0.0",
+  "license": "Apache-2.0",
+  "params": [
+    {
+      "key": "accel_x_g",
+      "unit": "g",
+      "min": -16,
+      "max": 16,
+      "default": 0,
+      "label": "X"
+    },
+    {
+      "key": "accel_y_g",
+      "unit": "g",
+      "min": -16,
+      "max": 16,
+      "default": 0,
+      "label": "Y"
+    },
+    {
+      "key": "accel_z_g",
+      "unit": "g",
+      "min": -16,
+      "max": 16,
+      "default": 1,
+      "label": "Z"
+    }
+  ],
+  "spi": {
+    "mode": 3,
+    "read_bit": {
+      "bit": 7,
+      "value": 1
+    },
+    "increment_bit": {
+      "bit": 6,
+      "value": 1
+    },
+    "address_mask": 63
+  },
+  "functions": {
+    "sample": {
+      "args": [
+        "g",
+        "en"
+      ],
+      "let": [
+        {
+          "v": "clamp(round(g * 1000 / sens), -(1 \u003c\u003c (nbits - 1)), (1 \u003c\u003c (nbits - 1)) - 1)"
+        }
+      ],
+      "return": "on \u0026\u0026 en ? v \u003c\u003c (16 - nbits) : 0"
+    },
+    "out": {
+      "args": [
+        "w",
+        "n"
+      ],
+      "return": "ble ? byte(w, 1 - n) : byte(w, n)"
+    }
+  },
+  "let": [
+    {
+      "odr": "bits(reg[0x20], 7, 4)"
+    },
+    {
+      "lp": "bit(reg[0x20], 3)"
+    },
+    {
+      "hr": "bit(reg[0x23], 3) \u0026\u0026 !lp"
+    },
+    {
+      "fs": "bits(reg[0x23], 5, 4)"
+    },
+    {
+      "ble": "bit(reg[0x23], 6)"
+    },
+    {
+      "on": "odr != 0 \u0026\u0026 odr \u003c= 9"
+    },
+    {
+      "nbits": "lp ? 8 : hr ? 12 : 10"
+    },
+    {
+      "sens": "lp ? [16, 32, 64, 192][fs] : hr ? [1, 2, 4, 12][fs] : [4, 8, 16, 48][fs]"
+    },
+    {
+      "wx": "sample(accel_x_g, bit(reg[0x20], 0))"
+    },
+    {
+      "wy": "sample(accel_y_g, bit(reg[0x20], 1))"
+    },
+    {
+      "wz": "sample(accel_z_g, bit(reg[0x20], 2))"
+    }
+  ],
+  "registers": [
+    {
+      "at": 7,
+      "u8": 0,
+      "name": "STATUS_REG_AUX"
+    },
+    {
+      "at": 15,
+      "u8": 51,
+      "name": "WHO_AM_I",
+      "writable": false
+    },
+    {
+      "at": 30,
+      "u8": 16,
+      "name": "CTRL_REG0"
+    },
+    {
+      "at": 31,
+      "u8": 0,
+      "name": "TEMP_CFG_REG"
+    },
+    {
+      "at": 32,
+      "u8": 7,
+      "name": "CTRL_REG1"
+    },
+    {
+      "at": 33,
+      "u8": 0,
+      "name": "CTRL_REG2"
+    },
+    {
+      "at": 34,
+      "u8": 0,
+      "name": "CTRL_REG3"
+    },
+    {
+      "at": 35,
+      "u8": 0,
+      "name": "CTRL_REG4"
+    },
+    {
+      "at": 36,
+      "u8": 0,
+      "name": "CTRL_REG5"
+    },
+    {
+      "at": 37,
+      "u8": 0,
+      "name": "CTRL_REG6"
+    },
+    {
+      "at": 38,
+      "u8": 0,
+      "name": "REFERENCE"
+    },
+    {
+      "at": 39,
+      "u8": "on ? 0x0F : 0x00",
+      "name": "STATUS_REG"
+    },
+    {
+      "at": 40,
+      "name": "OUT_X_L",
+      "bytes": [
+        "out(wx, 0)",
+        "out(wx, 1)",
+        "out(wy, 0)",
+        "out(wy, 1)",
+        "out(wz, 0)",
+        "out(wz, 1)"
+      ]
+    },
+    {
+      "at": 46,
+      "u8": 0,
+      "name": "FIFO_CTRL_REG"
+    },
+    {
+      "at": 47,
+      "u8": 32,
+      "name": "FIFO_SRC_REG",
+      "writable": false
+    }
+  ]
+}
+

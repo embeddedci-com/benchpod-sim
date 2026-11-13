@@ -1,0 +1,279 @@
+{
+  "format": 1,
+  "kind": "i2c",
+  "name": "bme280",
+  "label": "Bosch BME280: temperature, pressure and humidity",
+  "description": "Forced and normal mode with a fixed factory trim. Readings come from the datasheet's own\ncompensation formulas: the pod solves them for the raw codes.\n",
+  "datasheet": "https://www.bosch-sensortec.com/products/environmental-sensors/humidity-sensors-bme280/",
+  "version": "1.0.0",
+  "license": "Apache-2.0",
+  "params": [
+    {
+      "key": "temperature_c",
+      "unit": "C",
+      "min": -100,
+      "max": 150,
+      "default": 25,
+      "label": "Temperature"
+    },
+    {
+      "key": "pressure_pa",
+      "unit": "Pa",
+      "min": 1000,
+      "max": 200000,
+      "default": 101325,
+      "label": "Pressure"
+    },
+    {
+      "key": "humidity_pct",
+      "unit": "%",
+      "min": 0,
+      "max": 100,
+      "default": 40,
+      "label": "Humidity"
+    }
+  ],
+  "i2c": {
+    "address": 118,
+    "alt_addresses": [
+      119
+    ]
+  },
+  "constants": {
+    "T1": 27504,
+    "T2": 26435,
+    "T3": -1000,
+    "P1": 36477,
+    "P2": -10685,
+    "P3": 3024,
+    "P4": 2855,
+    "P5": 140,
+    "P6": -7,
+    "P7": 15500,
+    "P8": -14600,
+    "P9": 6000,
+    "H1": 75,
+    "H2": 362,
+    "H3": 0,
+    "H4": 322,
+    "H5": 50,
+    "H6": 30
+  },
+  "functions": {
+    "t_fine": {
+      "args": [
+        "adc_t"
+      ],
+      "let": [
+        {
+          "var1": "(((adc_t \u003e\u003e 3) - (T1 \u003c\u003c 1)) * T2) \u003e\u003e 11"
+        },
+        {
+          "var2": "(((((adc_t \u003e\u003e 4) - T1) * ((adc_t \u003e\u003e 4) - T1)) \u003e\u003e 12) * T3) \u003e\u003e 14"
+        }
+      ],
+      "return": "var1 + var2"
+    },
+    "temp_c": {
+      "args": [
+        "adc_t"
+      ],
+      "return": "((t_fine(adc_t) * 5 + 128) \u003e\u003e 8) / 100"
+    },
+    "press_pa": {
+      "args": [
+        "adc_p",
+        "tf"
+      ],
+      "let": [
+        {
+          "v1": "tf - 128000"
+        },
+        {
+          "v2a": "v1 * v1 * P6 + v1 * P5 * 131072 + P4 * 34359738368"
+        },
+        {
+          "v1b": "((140737488355328 + v1 * v1 * P3 / 256 + v1 * P2 * 4096) * P1) / 8589934592"
+        },
+        {
+          "p0": "((1048576 - adc_p) * 2147483648 - v2a) * 3125 / v1b"
+        },
+        {
+          "r13": "trunc(p0 / 8192)"
+        },
+        {
+          "w1": "trunc(P9 * r13 * r13 / 33554432)"
+        },
+        {
+          "w2": "trunc(P8 * p0 / 524288)"
+        }
+      ],
+      "return": "(trunc((p0 + w1 + w2) / 256) + P7 * 16) / 256"
+    },
+    "hum_pct": {
+      "args": [
+        "adc_h",
+        "tf"
+      ],
+      "let": [
+        {
+          "v": "tf - 76800"
+        },
+        {
+          "a": "((((adc_h \u003c\u003c 14) - (H4 \u003c\u003c 20) - (H5 * v)) + 16384) \u003e\u003e 15)"
+        },
+        {
+          "b": "(((((((v * H6) \u003e\u003e 10) * (((v * H3) \u003e\u003e 11) + 32768)) \u003e\u003e 10) + 2097152) * H2 + 8192) \u003e\u003e 14)"
+        },
+        {
+          "w": "a * b"
+        },
+        {
+          "w2": "clamp(w - (((((w \u003e\u003e 15) * (w \u003e\u003e 15)) \u003e\u003e 7) * H1) \u003e\u003e 4), 0, 419430400)"
+        }
+      ],
+      "return": "(w2 \u003e\u003e 12) / 1024"
+    }
+  },
+  "let": [
+    {
+      "adc_t": "solve(temp_c, temperature_c, 0, 0xFFFFF)"
+    },
+    {
+      "tf": "t_fine(adc_t)"
+    },
+    {
+      "adc_p": "solve(press_pa(_, tf), pressure_pa, 0, 0xFFFFF)"
+    },
+    {
+      "adc_h": "solve(hum_pct(_, tf), humidity_pct, 0, 0xFFFF)"
+    }
+  ],
+  "registers": [
+    {
+      "at": 136,
+      "u16le": "T1",
+      "name": "dig_T1"
+    },
+    {
+      "at": 138,
+      "s16le": "T2"
+    },
+    {
+      "at": 140,
+      "s16le": "T3"
+    },
+    {
+      "at": 142,
+      "u16le": "P1"
+    },
+    {
+      "at": 144,
+      "s16le": "P2"
+    },
+    {
+      "at": 146,
+      "s16le": "P3"
+    },
+    {
+      "at": 148,
+      "s16le": "P4"
+    },
+    {
+      "at": 150,
+      "s16le": "P5"
+    },
+    {
+      "at": 152,
+      "s16le": "P6"
+    },
+    {
+      "at": 154,
+      "s16le": "P7"
+    },
+    {
+      "at": 156,
+      "s16le": "P8"
+    },
+    {
+      "at": 158,
+      "s16le": "P9"
+    },
+    {
+      "at": 161,
+      "u8": "H1"
+    },
+    {
+      "at": 208,
+      "u8": 96,
+      "name": "id",
+      "writable": false
+    },
+    {
+      "at": 225,
+      "s16le": "H2"
+    },
+    {
+      "at": 227,
+      "u8": "H3"
+    },
+    {
+      "at": 228,
+      "bytes": [
+        "(H4 \u003e\u003e 4) \u0026 0xFF",
+        "((H5 \u0026 0x0F) \u003c\u003c 4) | (H4 \u0026 0x0F)",
+        "(H5 \u003e\u003e 4) \u0026 0xFF",
+        "u8(H6)"
+      ]
+    },
+    {
+      "at": 242,
+      "u8": 0,
+      "name": "ctrl_hum"
+    },
+    {
+      "at": 243,
+      "u8": 0,
+      "name": "status"
+    },
+    {
+      "at": 244,
+      "u8": 0,
+      "name": "ctrl_meas"
+    },
+    {
+      "at": 245,
+      "u8": 0,
+      "name": "config"
+    },
+    {
+      "at": 247,
+      "name": "press_temp_hum",
+      "bytes": [
+        "bits(adc_p, 19, 12)",
+        "bits(adc_p, 11, 4)",
+        "bits(adc_p, 3, 0) \u003c\u003c 4",
+        "bits(adc_t, 19, 12)",
+        "bits(adc_t, 11, 4)",
+        "bits(adc_t, 3, 0) \u003c\u003c 4",
+        "bits(adc_h, 15, 8)",
+        "bits(adc_h, 7, 0)"
+      ]
+    }
+  ],
+  "conversion": {
+    "trigger": 244,
+    "time_us": 5500,
+    "busy": {
+      "at": 243,
+      "mask": 8
+    }
+  },
+  "on_write": [
+    {
+      "when": "written == 0xE0 \u0026\u0026 value == 0xB6",
+      "do": "reset"
+    }
+  ]
+}
+

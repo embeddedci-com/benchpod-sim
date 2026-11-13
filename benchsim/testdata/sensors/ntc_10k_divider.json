@@ -1,0 +1,38 @@
+{
+  "format": 1,
+  "kind": "analog",
+  "name": "ntc_10k_divider",
+  "label": "NTC 10k thermistor in a voltage divider",
+  "description": "A 10 kOhm NTC (B = 3950 K, 10 kOhm at 25 °C) from the ADC input to ground, with a 10 kOhm\nresistor from 3.3 V to the input: the pod puts out the voltage the DUT's ADC would see. Copy\nthe file and change the constants for another divider (a pull-down instead of a pull-up: swap\nthe two resistances in `value`).\n",
+  "datasheet": "https://en.wikipedia.org/wiki/Thermistor#B_or_β_parameter_equation",
+  "version": "1.0.0",
+  "license": "Apache-2.0",
+  "params": [
+    {
+      "key": "temperature_c",
+      "unit": "C",
+      "min": -40,
+      "max": 125,
+      "default": 25,
+      "label": "Temperature"
+    }
+  ],
+  "constants": {
+    "VREF": 3.3,
+    "R_FIXED": 10000,
+    "R25": 10000,
+    "BETA": 3950
+  },
+  "let": [
+    {
+      "r_ntc": "R25 * exp(BETA * (1 / (temperature_c + 273.15) - 1 / 298.15))"
+    }
+  ],
+  "output": "voltage",
+  "value": "VREF * r_ntc / (r_ntc + R_FIXED)",
+  "range": {
+    "min": 0,
+    "max": 3.3
+  }
+}
+

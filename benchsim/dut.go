@@ -234,9 +234,6 @@ func (s *Sim) fastForward(delta int64) {
 		d.env.reads += n
 		d.env.seq += n
 		d.alEnvSeq = d.env.seq
-		if e := s.sensorAt(d.env.addr); e != nil {
-			e.xfers += 2 * int(n)
-		}
 	}
 	d.envNext += delta
 	d.alNext += delta
