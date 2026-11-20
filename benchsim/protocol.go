@@ -376,7 +376,7 @@ var knownPodCommands = map[string]bool{
 	"calibration": true, "can_start": true, "can_write": true, "can_read": true,
 	"can_status": true, "can_term": true, "can_respond": true, "can_stop": true,
 	"spi_start": true,
-	"spi_stop":  true, "spi_xfer": true, "spi_stream": true, "spi_flash": true, "usb_net": true,
-	"lan_tls": true, "sig_policy": true, "lan_policy": true, "wifi": true, "dac_set": true,
+	"spi_stop":  true, "spi_xfer": true, "spi_stream": true, "spi_flash": true, "usb_network": true,
+	"lan_tls": true, "sig_policy": true, "lan_policy": true, "wifi_status": true, "dac_set": true,
 	"measure": true, "psram_recover": true, "cloud_config": true, "flash_self": true,
 }
