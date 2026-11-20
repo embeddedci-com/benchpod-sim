@@ -205,3 +205,56 @@ func TestGenerateForms(t *testing.T) {
 		ok(t, addr, map[string]any{"cmd": "dac_stop"})
 	}
 }
+
+// Signatures are always required, the LAN cannot change lan_tls or usb_network, and SCPI is off
+// until the cloud switches it on.
+func TestPolicies(t *testing.T) {
+	s, addr := startSim(t, WithFirmware("4.0.0", Hooks{}))
+	sp := ok(t, addr, map[string]any{"cmd": "sig_policy", "set": "required"}).(map[string]any)
+	if sp["policy"] != "required" || sp["lan_unsigned"] != nil {
+		t.Fatalf("sig_policy: %v", sp)
+	}
+	for _, want := range []string{"audit", "permissive"} {
+		r := s.ExecReply(map[string]any{"cmd": "sig_policy", "set": want, "client_api": 2}, true)
+		if r.Code != "BP0074" || r.Args["setting"] != "sig_policy" || r.Args["want"] != want {
+			t.Fatalf("sig_policy %s from the cloud: %+v", want, r)
+		}
+	}
+	tls := ok(t, addr, map[string]any{"cmd": "lan_tls"}).(map[string]any)
+	if tls["https_only"] != true || tls["scpi"] != false {
+		t.Fatalf("lan_tls defaults: %v", tls)
+	}
+	if msg := refused(t, addr, map[string]any{"cmd": "lan_tls", "scpi": true}); msg != "BP0042 setting=lan_tls" {
+		t.Fatal(msg)
+	}
+	if msg := refused(t, addr, map[string]any{"cmd": "usb_network", "enabled": false}); msg != "BP0043 setting=usb_network" {
+		t.Fatal(msg)
+	}
+	if u := ok(t, addr, map[string]any{"cmd": "usb_network"}).(map[string]any); u["enabled"] != true {
+		t.Fatalf("usb_network: %v", u)
+	}
+	st := ok(t, addr, map[string]any{"cmd": "status"}).(map[string]any)
+	if usb := st["usb"].(map[string]any); usb["net"] != false || usb["enabled"] != true {
+		t.Fatalf("status.usb: %v", usb)
+	}
+	scpi := func() string {
+		c, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+		_, _ = c.Write([]byte("*IDN?\n"))
+		line, _ := bufio.NewReader(c).ReadString('\n')
+		return line
+	}
+	if line := scpi(); !strings.HasPrefix(line, "SCPI is off on this BenchPod") {
+		t.Fatalf("SCPI off: %q", line)
+	}
+	if r := s.ExecReply(map[string]any{"cmd": "lan_tls", "scpi": true, "client_api": 2}, true); r.Error != "" {
+		t.Fatalf("lan_tls scpi from the cloud: %+v", r)
+	}
+	if line := scpi(); !strings.HasPrefix(line, "EmbeddedCI,BenchPod,0,4.0.0") {
+		t.Fatalf("SCPI on: %q", line)
+	}
+}

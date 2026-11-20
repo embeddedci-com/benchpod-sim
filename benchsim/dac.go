@@ -1023,24 +1023,28 @@ func (s *Sim) cmdPsramPing(c *conn, r request) (any, error) {
 
 // The policies and cloud link settings (command_handler_policy.c, pod_policy.c).
 
-func (s *Sim) cmdSigPolicy(c *conn, r request) (any, error) {
+// cmdSigPolicy: firmware 4.0.0 installs only signed images. "set":"required" is fine from every
+// source; audit and permissive, and lan_unsigned true, are refused with BP0074. clear_floor is for
+// the USB link only, which the simulator has not.
+func (s *Sim) cmdSigPolicy(_ *conn, r request) (any, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if r.has("set") {
-		order := map[string]int{"audit": 0, "permissive": 1, "required": 2}
-		v, ok := order[r.str("set")]
-		if !ok {
-			return nil, fwError("sig_policy: set must be audit, permissive or required")
+		switch v := r.str("set"); v {
+		case "required":
+		case "audit", "permissive":
+			return nil, coded(codeSignaturesAlwaysReqd, "setting", "sig_policy", "want", v)
+		default:
+			return nil, fwError("sig_policy: set must be required")
 		}
-		if !c.cloud {
-			return nil, fwError("sig_policy: change it from the cloud or the USB console")
-		}
-		if v < order[s.flash.sigPolicy] {
-			return nil, errf("sig_policy: only the USB console can loosen the policy (now %s)", s.flash.sigPolicy)
-		}
-		s.flash.sigPolicy = r.str("set")
 	}
-	return map[string]any{"policy": s.flash.sigPolicy, "enforces": true, "keys": 1}, nil
+	if r.has("lan_unsigned") && r.str("lan_unsigned") != "false" {
+		return nil, coded(codeSignaturesAlwaysReqd, "setting", "lan_unsigned", "want", r.str("lan_unsigned"))
+	}
+	if r.flag("clear_floor") {
+		return nil, coded(codeSettingDeviceOnly, "setting", "rollback_floor")
+	}
+	return map[string]any{"policy": s.flash.sigPolicy, "enforces": true, "keys": 1, "rollback_floor": nil}, nil
 }
 
 func (s *Sim) cmdLanPolicy(c *conn, r request) (any, error) {
@@ -1052,7 +1056,7 @@ func (s *Sim) cmdLanPolicy(c *conn, r request) (any, error) {
 			return nil, fwError("lan_policy: set must be open, locked or off")
 		}
 		if !c.cloud {
-			return nil, fwError("lan_policy: change it from the cloud or the USB console")
+			return nil, coded(codePolicyNotFromLan, "setting", "lan_policy")
 		}
 		s.flash.lanPolicy = p
 	}
@@ -1061,12 +1065,57 @@ func (s *Sim) cmdLanPolicy(c *conn, r request) (any, error) {
 
 func (s *Sim) cloudLinkGate(c *conn, verb string) error {
 	if !c.cloud {
-		return errf("%s: change it from the cloud or over USB", verb)
+		return coded(codeSettingCloudOrUsb, "setting", verb)
 	}
 	if s.pod.capture || s.pod.heavy != nil || s.pod.load != nil {
-		return fwError("busy: a capture, upload or update is using the PSRAM bus; try again when it ends")
+		return coded(codeStorageBusBusy, "what", "a capture, upload or update is running")
 	}
 	return nil
+}
+
+// cmdUsbNetwork: whether the pod's USB port is also a network adapter. Only the device changes
+// it (the USB console, or a connection over the USB link, which the simulator has not): the LAN
+// and the cloud get BP0043.
+func (s *Sim) cmdUsbNetwork(_ *conn, r request) (any, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if r.has("enabled") {
+		if _, ok := r["enabled"].(bool); !ok {
+			return nil, fwError("usb_network: enabled must be true or false")
+		}
+		return nil, coded(codeSettingDeviceOnly, "setting", "usb_network")
+	}
+	return map[string]any{"enabled": s.flash.usbNet}, nil
+}
+
+// cmdLanTLS: the LAN API over TLS. HTTPS-only (default on) and SCPI (default off) change from the
+// cloud or over USB; the external LAN gets BP0042. The simulator serves plaintext only and keeps
+// answering JSON on it whatever https_only says.
+func (s *Sim) cmdLanTLS(c *conn, r request) (any, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, k := range []string{"https_only", "scpi"} {
+		if !r.has(k) {
+			continue
+		}
+		v, ok := r[k].(bool)
+		if !ok {
+			return nil, errf("lan_tls: %s must be true or false", k)
+		}
+		if !c.cloud {
+			return nil, coded(codeSettingCloudOrUsb, "setting", "lan_tls")
+		}
+		if k == "https_only" {
+			s.flash.httpsOff = !v
+		} else {
+			s.flash.scpi = v
+		}
+	}
+	if r.flag("regenerate") && !c.cloud {
+		return nil, coded(codeSettingCloudOrUsb, "setting", "lan_tls")
+	}
+	return map[string]any{"port": 8443, "https_only": !s.flash.httpsOff, "scpi": s.flash.scpi, "sessions": 0,
+		"error": "no certificate"}, nil
 }
 
 func (s *Sim) cmdCloudCa(c *conn, r request) (any, error) {

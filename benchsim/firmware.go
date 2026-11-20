@@ -73,11 +73,11 @@ func init() {
 		"eth":                   {0, flagNoHW | flagMixed, nil, nil},
 		"sig_policy":            {0, flagMixed, (*Sim).cmdSigPolicy, nil},
 		"lan_policy":            {0, flagMixed, (*Sim).cmdLanPolicy, nil},
-		"usb_network":           {0, flagMixed, nil, nil},
+		"usb_network":           {0, flagMixed, (*Sim).cmdUsbNetwork, nil},
 		"module":                {0, flagNoHW | flagMixed, nil, nil},
 		"cloud_ca":              {0, flagMixed, (*Sim).cmdCloudCa, nil},
 		"cloud_proxy":           {0, flagMixed, (*Sim).cmdCloudProxy, nil},
-		"lan_tls":               {0, flagMixed, nil, nil},
+		"lan_tls":               {0, flagMixed, (*Sim).cmdLanTLS, nil},
 		"generate":              {1, flagAnalog, (*Sim).cmdGenerateFw, nil},
 		"measure":               {1, flagAnalog | flagStream, nil, nil},
 		"load":                  {1, flagAnalog | flagStream, nil, nil},
@@ -146,13 +146,17 @@ func mixedWrite(cmd string, r request) bool {
 	case "dac_limits":
 		return r.has("path") || (r.has("enabled") && r.str("enabled") == "false")
 	case "calibrate":
-		return r.has("source") || r.has("dac") || r.has("adc") || notFalse("clear")
-	case "sig_policy", "lan_policy", "usb_network":
+		return r.has("source") || r.has("dac") || r.has("adc") || r.has("comp_hf_dc_e4") || notFalse("clear")
+	case "sig_policy":
+		return r.has("set") || notFalse("clear_floor")
+	case "lan_policy":
 		return r.has("set")
+	case "usb_network":
+		return r.has("enabled")
 	case "cloud_ca", "cloud_proxy":
 		return r.has("set") || r.str("clear") == "true"
 	case "lan_tls":
-		return r.has("https_only") || r.str("regenerate") == "true"
+		return r.has("https_only") || r.has("scpi") || r.str("regenerate") == "true"
 	case "module":
 		return r.has("eeprom") && r.str("eeprom") != "read"
 	case "eth":
@@ -323,6 +327,11 @@ func (s *Sim) serveStream(c net.Conn, cloud bool, maxTier int) {
 			continue
 		}
 		if t := bytes.TrimLeft(line, " \t"); t[0] != '{' {
+			if !s.scpiOn() {
+				// SCPI is off (the 4.0.0 default): one line, then the connection closes.
+				_, _ = cn.Write([]byte("SCPI is off on this BenchPod: switch it on over USB or from the cloud (console: lan-tls scpi on)\n"))
+				return
+			}
 			s.scpiLine(cn, string(t))
 			continue
 		}
@@ -344,6 +353,12 @@ func (s *Sim) scpiLine(c *conn, line string) {
 	if strings.EqualFold(strings.TrimSpace(line), "*IDN?") {
 		_, _ = c.Write([]byte(fmt.Sprintf("EmbeddedCI,BenchPod,0,%s\r\n", s.firmwareVersion())))
 	}
+}
+
+func (s *Sim) scpiOn() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.flash.scpi
 }
 
 func (s *Sim) firmwareVersion() string {
