@@ -63,7 +63,6 @@ func init() {
 		"capture":               {0, flagAnalog | flagStream | flagHeavy, nil, (*Sim).cmdCapture},
 		"capture_dual":          {0, flagStream | flagHeavy, nil, (*Sim).cmdCaptureDual},
 		"capture_read":          {0, flagStream | flagHeavy, nil, (*Sim).cmdCaptureRead},
-		"stream":                {0, flagAnalog | flagStream | flagHeavy, nil, (*Sim).cmdCapture},
 		"la_capture":            {0, flagStream | flagHeavy, nil, (*Sim).cmdLaCapture},
 		"sensor_la":             {0, flagStream | flagHeavy, nil, (*Sim).cmdSensorLa},
 		"can_read":              {0, flagNoHW | flagHeavy, simple((*Sim).cmdCanRead), nil},

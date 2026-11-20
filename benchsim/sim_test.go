@@ -329,12 +329,12 @@ func TestLaCaptureShowsTheBootLog(t *testing.T) {
 	t.Parallel()
 	_, addr := startSim(t, WithLaVoltage(3300))
 	ok(t, addr, map[string]any{"cmd": "target_power", "efuse": 1, "state": 1, "delay_ms": 300})
-	fs := frames(t, addr, map[string]any{"cmd": "la_capture", "samples": 60000, "sample_rate_mhz": 2.0,
+	fs := frames(t, addr, map[string]any{"cmd": "la_capture", "samples": 60000, "sample_rate_hz": 2e6,
 		"trigger": map[string]any{"la": 3, "edge": "falling"}, "trigger_timeout_ms": 5000})
 	var edges [][2]int
 	n := 0
 	for _, f := range fs {
-		if f["la"] != true || f["la_rate_hz"].(float64) != 2e6 {
+		if f["la"] != true || f["la_sample_rate_hz"].(float64) != 2e6 {
 			t.Fatalf("frame: %v", f)
 		}
 		for _, e := range f["la_edges"].([]any) {
@@ -356,7 +356,7 @@ func TestTriggerTimeout(t *testing.T) {
 	_, addr := startSim(t, WithLaVoltage(3300))
 	msg := refused(t, addr, map[string]any{"cmd": "la_capture", "samples": 1000,
 		"trigger": map[string]any{"la": 9, "edge": "rising"}, "trigger_timeout_ms": 100})
-	if !regexp.MustCompile(`trigger timeout: no rising edge on LA9`).MatchString(msg) {
+	if msg != "BP0038 edge=rising la=9 timeout_ms=100" {
 		t.Fatal(msg)
 	}
 }
@@ -377,9 +377,13 @@ func TestPowerProfileAndAdcCapture(t *testing.T) {
 	if avg := fs[len(fs)-1]["stats"].(map[string]any)["avg_ua"].(float64); avg != 0 {
 		t.Fatalf("rail off draws %v uA", avg)
 	}
-	fs = frames(t, addr, map[string]any{"cmd": "capture", "samples": 5000, "enc": "b64"})
-	if fs[0]["adc_rate_hz"].(float64) != adcMaxRateHz || fs[0]["b64"] == nil {
+	fs = frames(t, addr, map[string]any{"cmd": "capture", "samples": 5000})
+	if fs[0]["adc_sample_rate_hz"].(float64) != adcMaxRateHz || fs[0]["b64"] == nil || fs[0]["data"] != nil {
 		t.Fatalf("capture frame: %v", fs[0])
+	}
+	fs = frames(t, addr, map[string]any{"cmd": "capture", "samples": 100, "sample_rate_hz": 100000, "enc": "dec"})
+	if fs[0]["adc_sample_rate_hz"].(float64) != 100000 || fs[0]["b64"] != nil || len(fs[0]["data"].([]any)) == 0 {
+		t.Fatalf("decimal capture frame: %v", fs[0])
 	}
 }
 

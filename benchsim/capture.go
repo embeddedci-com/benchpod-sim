@@ -61,7 +61,7 @@ func (s *Sim) beginCapture(c *conn) error {
 		}
 		s.heavyRelease(c)
 	} else if s.pod.capture {
-		return fwError("busy: a capture is running")
+		return coded(codePodBusy)
 	}
 	s.pod.capture = true
 	return nil
@@ -128,11 +128,7 @@ func (s *Sim) waitTrigger(ts *trigSpec) (int64, error) {
 			return at, nil
 		}
 		if now >= deadline {
-			kind := "edge"
-			if ts.edge == "high" || ts.edge == "low" {
-				kind = "level"
-			}
-			return 0, errf("trigger timeout: no %s %s on LA%d within %d ms", ts.edge, kind, ts.la, ts.timeout/msNs)
+			return 0, coded(codeTriggerTimeout, "la", ts.la, "edge", ts.edge, "timeout_ms", int(ts.timeout/msNs))
 		}
 		if ts.edge == "rising" || ts.edge == "falling" {
 			from = now // edges after what was searched; a level can be checked from anywhere
@@ -156,7 +152,7 @@ func laFrames(c *conn, edges [][2]int, n int, rate float64, first map[string]any
 		}
 		m := map[string]any{"status": "chunk", "la": true, "la_edges": edges[i:j], "la_upto": upto, "more": !(last && final)}
 		if i == 0 || !c.sim.firmware {
-			m["status"], m["la_rate_hz"] = "ok", int(rate)
+			m["status"], m["la_sample_rate_hz"] = "ok", int(rate)
 		}
 		if i == 0 && c.sim.firmware {
 			m["bits"] = 16
@@ -191,10 +187,10 @@ func (s *Sim) cmdLaCapture(c *conn, r request) error {
 	}
 	n := r.int("samples", 256)
 	if n <= 0 || n > 4_000_000 {
-		return fail(fwError("samples out of range"))
+		return fail(coded(codeSamplesOutOfRange, "max", 4_000_000))
 	}
-	mhz, _ := r.num("sample_rate_mhz")
-	rate := laRate(mhz * 1e6)
+	hz, _ := r.num("sample_rate_hz")
+	rate := laRate(hz)
 	n = s.clampSamples(n, maxLaSamples, rate)
 	ts, err := parseTrigger(r)
 	if err != nil {
@@ -258,10 +254,10 @@ func (s *Sim) cmdSensorLa(c *conn, r request) error {
 	}
 	bytes := r.int("samples", 256)
 	if bytes <= 0 || bytes > maxSensorLaB {
-		return fail(fwError("samples must be 1..4096"))
+		return fail(coded(codeSamplesOutOfRange, "max", maxSensorLaB))
 	}
-	mhz, _ := r.num("sample_rate_mhz")
-	rate := laRate(mhz * 1e6)
+	hz, _ := r.num("sample_rate_hz")
+	rate := laRate(hz)
 	n := bytes * 4
 	if err := s.beginCapture(c); err != nil {
 		return fail(err)
@@ -316,24 +312,33 @@ func (s *Sim) cmdSensorLa(c *conn, r request) error {
 		pair := (w>>(scl-1)&1)<<1 | (w >> (sda - 1) & 1)
 		out[i/4] |= pair << ((3 - i%4) * 2)
 	}
-	return sendSamples(c, out, 1024)
+	return sendSamples(c, out, 1024, int(rate))
 }
 
-// sendSamples writes a sample list the way bulk_begin does: chunks of "data" with "more".
-func sendSamples(c *conn, data []int, per int) error {
+// sendSamples writes a sample list the way bulk_begin does: chunks of "data" with "more", the
+// first with the LA rate it ran at.
+func sendSamples(c *conn, data []int, per, rateHz int) error {
 	if len(data) == 0 {
-		return c.send(map[string]any{"status": "ok", "data": []int{}, "more": false})
+		return c.send(map[string]any{"status": "ok", "la_sample_rate_hz": rateHz, "data": []int{}, "more": false})
 	}
 	for i := 0; i < len(data); i += per {
 		j := min(i+per, len(data))
-		if err := c.send(map[string]any{"status": "ok", "data": data[i:j], "more": j < len(data)}); err != nil {
+		m := map[string]any{"status": "ok", "data": data[i:j], "more": j < len(data)}
+		if i == 0 {
+			m["la_sample_rate_hz"] = rateHz
+		}
+		if err := c.send(m); err != nil {
 			return nil
 		}
 	}
 	return nil
 }
 
-// adcChunk is one dense ADC frame: base64url of little-endian uint16 ("enc":"b64") or decimal.
+// wantsB64 is wants_b64: dense samples come as base64 unless the request says "enc":"dec"
+// (firmware 4.0.0; up to 3.10.13 decimal was the default).
+func wantsB64(r request) bool { return r.str("enc") != "dec" }
+
+// adcChunk is one dense ADC frame: base64url of little-endian uint16 (the default) or decimal.
 func adcChunk(counts []int, b64 bool) map[string]any {
 	if !b64 {
 		return map[string]any{"status": "ok", "data": counts}
@@ -353,7 +358,9 @@ func (s *Sim) adcCounts(t0 int64, n int, rate float64) []int {
 	return out
 }
 
-func sendAdc(c *conn, counts []int, rate float64, b64, final bool) error {
+// sendAdc sends the ADC region; laRate, when not 0, is the LA's rate in the same first frame
+// (capture_dual).
+func sendAdc(c *conn, counts []int, rate, laRate float64, b64, final bool) error {
 	for i := 0; i < len(counts) || i == 0; i += samplesPerChnk {
 		j := min(i+samplesPerChnk, len(counts))
 		m := adcChunk(counts[i:j], b64)
@@ -362,7 +369,10 @@ func sendAdc(c *conn, counts []int, rate float64, b64, final bool) error {
 		}
 		if i == 0 {
 			m["status"] = "ok"
-			m["adc_rate_hz"] = int(rate)
+			m["adc_sample_rate_hz"] = int(rate)
+			if laRate > 0 {
+				m["la_sample_rate_hz"] = int(laRate)
+			}
 			m["bits"] = 16
 		}
 		if final && j >= len(counts) && c.trigger != nil {
@@ -386,13 +396,10 @@ func (s *Sim) cmdCapture(c *conn, r request) error {
 	}
 	n := r.int("samples", 256)
 	if n <= 0 || n > 32768 {
-		if s.firmware {
-			return fail(fwError("samples out of range (use capture_dual for deep captures)"))
-		}
-		return fail(fwError("samples out of range"))
+		return fail(coded(codeSamplesOutOfRange, "max", 32768))
 	}
-	mhz, _ := r.num("sample_rate_mhz")
-	rate := adcRate(mhz * 1e6)
+	hz, _ := r.num("sample_rate_hz")
+	rate := adcRate(hz)
 	n = s.clampSamples(n, maxAdcSamples, rate)
 	if err := s.beginCapture(c); err != nil {
 		return fail(err)
@@ -409,7 +416,7 @@ func (s *Sim) cmdCapture(c *conn, r request) error {
 	s.advance(s.now())
 	counts := s.adcCounts(t0, n, rate)
 	s.mu.Unlock()
-	return sendAdc(c, counts, rate, r.str("enc") == "b64", true)
+	return sendAdc(c, counts, rate, 0, wantsB64(r), true)
 }
 
 // cmdCaptureDual is one trigger for an ADC and an LA stream (either may be empty): the deep
@@ -424,7 +431,7 @@ func (s *Sim) cmdCaptureDual(c *conn, r request) error {
 		return fail(fwError("adc_samples and la_samples are both 0"))
 	}
 	if s.firmware && (na+nl)*2 > 8<<20 {
-		return fail(fwError("capture too deep: LA+ADC+DAC exceed 8 MB PSRAM"))
+		return fail(coded(codePsramTooSmall))
 	}
 	if na < 0 || nl < 0 || na+nl == 0 || na > 8_000_000 || nl > 4_000_000 {
 		return fail(fwError("samples out of range"))
@@ -437,9 +444,9 @@ func (s *Sim) cmdCaptureDual(c *conn, r request) error {
 			return fail(err)
 		}
 	}
-	amhz, _ := r.num("adc_rate_mhz")
-	lmhz, _ := r.num("la_rate_mhz")
-	ar, lr := adcRate(amhz*1e6), laRate(lmhz*1e6)
+	ahz, _ := r.num("adc_sample_rate_hz")
+	lhz, _ := r.num("la_sample_rate_hz")
+	ar, lr := adcRate(ahz), laRate(lhz)
 	na = s.clampSamples(na, maxAdcSamples, ar)
 	if nl > 0 {
 		nl = s.clampSamples(nl, maxLaSamples, lr)
@@ -491,7 +498,11 @@ func (s *Sim) cmdCaptureDual(c *conn, r request) error {
 		c.trigger = map[string]any{"la": ts.la, "edge": ts.edge, "fired": true}
 	}
 	if na > 0 {
-		if err := sendAdc(c, counts, ar, r.str("enc") == "b64", nl == 0); err != nil {
+		lrHz := 0.0
+		if nl > 0 {
+			lrHz = lr
+		}
+		if err := sendAdc(c, counts, ar, lrHz, wantsB64(r), nl == 0); err != nil {
 			return nil
 		}
 	}
@@ -576,7 +587,7 @@ func (s *Sim) cmdCaptureRead(c *conn, r request) error {
 	if off < na {
 		for i := off; i < na; i += samplesPerChnk {
 			j := min(i+samplesPerChnk, na)
-			m := adcChunk(lc.adc[i:j], r.str("enc") == "b64")
+			m := adcChunk(lc.adc[i:j], wantsB64(r))
 			m["status"] = "chunk"
 			m["more"] = !(j >= na && lc.nl == 0)
 			if err := c.send(m); err != nil {

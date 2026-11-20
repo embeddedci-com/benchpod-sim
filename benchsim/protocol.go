@@ -185,6 +185,9 @@ const (
 	codePodBusy              = 47
 	codeStorageBusBusy       = 48
 	codeSignaturesAlwaysReqd = 74
+	codeTriggerTimeout       = 38
+	codeSamplesOutOfRange    = 67
+	codePsramTooSmall        = 72
 	codeLaNoPull             = 23
 	codeLaPullDirection      = 24
 )

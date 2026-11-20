@@ -427,8 +427,8 @@ func (s *Sim) cmdReplay(c *conn, r request) (any, error) {
 	if s.pod.tracePsram && s.pod.image != 1 {
 		return nil, fwError("replay failed")
 	}
-	mhz, _ := r.num("sample_rate_mhz")
-	rate := replayRate(mhz*1e6, s.pod.tracePsram)
+	hz, _ := r.num("sample_rate_hz")
+	rate := replayRate(hz, s.pod.tracePsram)
 	s.snapshotAnalog(now)
 	d := &s.pod.analog.dac
 	cotrig := r.flag("on_capture")

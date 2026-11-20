@@ -75,3 +75,33 @@ func TestClientAPIGate(t *testing.T) {
 		t.Fatalf("la_pins: %+v", r)
 	}
 }
+
+// The 4.0.0 names: rates in Hz (sample_rate_hz, adc_sample_rate_hz, la_sample_rate_hz), base64
+// ADC samples by default, and no stream verb.
+func TestCaptureNames(t *testing.T) {
+	_, addr := startSim(t, WithFirmware("4.0.0", Hooks{}), WithLaVoltage(3300))
+	fs := frames(t, addr, map[string]any{"cmd": "capture_dual", "adc_samples": 300, "adc_sample_rate_hz": 200000,
+		"la_samples": 400, "la_sample_rate_hz": 1e6})
+	if fs[0]["adc_sample_rate_hz"] != 200000.0 || fs[0]["la_sample_rate_hz"] != 1e6 || fs[0]["b64"] == nil {
+		t.Fatalf("first frame: %v", fs[0])
+	}
+	var la map[string]any
+	for _, f := range fs {
+		if f["la"] == true {
+			la = f
+			break
+		}
+	}
+	if la == nil || la["la_sample_rate_hz"] != 1e6 {
+		t.Fatalf("no LA frame with its rate: %v", fs)
+	}
+	if fs := frames(t, addr, map[string]any{"cmd": "capture_read", "offset": 0, "enc": "dec"}); fs[0]["data"] == nil {
+		t.Fatalf("capture_read enc dec: %v", fs[0])
+	}
+	if msg := refused(t, addr, map[string]any{"cmd": "stream", "samples": 100}); msg != "BP0002 cmd=stream" {
+		t.Fatal(msg)
+	}
+	if msg := refused(t, addr, map[string]any{"cmd": "capture", "samples": 40000}); msg != "BP0067 max=32768" {
+		t.Fatal(msg)
+	}
+}
