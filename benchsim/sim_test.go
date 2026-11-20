@@ -232,7 +232,7 @@ func TestBootLogAndConsole(t *testing.T) {
 	if mv := v["mv"].(float64); math.Abs(mv-1500) > 5 {
 		t.Errorf("adc_read of PA4 at 1500 mV: %v", v)
 	}
-	ok(t, addr, map[string]any{"cmd": "dac_out", "path": "3v3", "volts": 1.1})
+	ok(t, addr, map[string]any{"cmd": "dac_out", "path": "3v3", "v": 1.1})
 	time.Sleep(50 * time.Millisecond)
 	k.send("ain")
 	ain := k.expect(`AIN [^\r]*\r\n`, 2*time.Second)
@@ -364,16 +364,16 @@ func TestTriggerTimeout(t *testing.T) {
 func TestPowerProfileAndAdcCapture(t *testing.T) {
 	t.Parallel()
 	_, addr := startSim(t, WithDUTPowered())
-	fs := frames(t, addr, map[string]any{"cmd": "power_profile", "efuse": 1, "rate_hz": 500, "keep_samples": 200, "duration_ms": 500})
+	fs := frames(t, addr, map[string]any{"cmd": "power_profile", "efuse": 1, "sample_rate_hz": 500, "keep_samples": 200, "duration_ms": 500})
 	stats := fs[len(fs)-1]["stats"].(map[string]any)
 	if avg := stats["avg_ua"].(float64); avg < 40000 || avg > 50000 {
 		t.Fatalf("idle current %v uA", avg)
 	}
-	if r := stats["rate_hz"].(float64); r < 360 || r > 370 {
+	if r := stats["sample_rate_hz"].(float64); r < 360 || r > 370 {
 		t.Fatalf("rate %v", r)
 	}
 	ok(t, addr, map[string]any{"cmd": "target_power", "efuse": 1, "state": 0})
-	fs = frames(t, addr, map[string]any{"cmd": "power_profile", "efuse": 1, "rate_hz": 200, "keep_samples": 0, "duration_ms": 200})
+	fs = frames(t, addr, map[string]any{"cmd": "power_profile", "efuse": 1, "sample_rate_hz": 200, "keep_samples": 0, "duration_ms": 200})
 	if avg := fs[len(fs)-1]["stats"].(map[string]any)["avg_ua"].(float64); avg != 0 {
 		t.Fatalf("rail off draws %v uA", avg)
 	}

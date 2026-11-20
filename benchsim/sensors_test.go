@@ -266,12 +266,12 @@ func TestSensorUARTAndAnalog(t *testing.T) {
 	if v := out(); v > 1.2 {
 		t.Fatalf("60 degC: %v V", v)
 	}
-	msg := refused(t, addr, map[string]any{"cmd": "dac_out", "path": "3v3", "volts": 1})
+	msg := refused(t, addr, map[string]any{"cmd": "dac_out", "path": "3v3", "v": 1})
 	if msg != `the dac output is played by sensor:ntc; stop it first ({"cmd":"sensor_stop","instance":"ntc"})` {
 		t.Fatalf("dac_out: %q", msg)
 	}
 	ok(t, addr, map[string]any{"cmd": "dac_stop"})
-	ok(t, addr, map[string]any{"cmd": "dac_out", "path": "3v3", "volts": 1})
+	ok(t, addr, map[string]any{"cmd": "dac_out", "path": "3v3", "v": 1})
 }
 
 func TestSensorEmulationImage(t *testing.T) {

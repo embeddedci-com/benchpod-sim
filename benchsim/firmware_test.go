@@ -105,3 +105,38 @@ func TestCaptureNames(t *testing.T) {
 		t.Fatal(msg)
 	}
 }
+
+// The 4.0.0 field names of SPI, power_profile, dac_out, the loop and CAN.
+func TestRenamedFields(t *testing.T) {
+	_, addr := startSim(t, WithFirmware("4.0.0", Hooks{}), WithLaVoltage(3300))
+	spi := ok(t, addr, map[string]any{"cmd": "spi_start", "sck": 10, "mosi": 11, "miso": 12, "cs": 13, "clock_hz": 1000000}).(map[string]any)
+	if spi["clock_hz"] != 1e6 || spi["hz"] != nil {
+		t.Fatalf("spi_start: %v", spi)
+	}
+	if st := ok(t, addr, map[string]any{"cmd": "spi_status"}).(map[string]any); st["clock_hz"] != 1e6 {
+		t.Fatalf("spi_status: %v", st)
+	}
+	ok(t, addr, map[string]any{"cmd": "spi_stop"})
+	out := ok(t, addr, map[string]any{"cmd": "dac_out", "path": "3v3", "v": 1.5}).(map[string]any)
+	if mv := out["mv"].(float64); mv < 1495 || mv > 1505 || out["code16"] == nil || out["code"] != nil {
+		t.Fatalf("dac_out: %v", out)
+	}
+	if p := ok(t, addr, map[string]any{"cmd": "dac_loop_probe"}).(map[string]any); p["code16"] == nil || p["v"] != nil {
+		t.Fatalf("dac_loop_probe: %v", p)
+	}
+	fs := frames(t, addr, map[string]any{"cmd": "power_profile", "action": "start", "efuse": 1, "sample_rate_hz": 200})
+	if fs[0]["data"].(map[string]any)["sample_rate_hz"] != 200.0 {
+		t.Fatalf("power_profile start: %v", fs[0])
+	}
+	frames(t, addr, map[string]any{"cmd": "power_profile", "action": "stop"})
+	if msg := refused(t, addr, map[string]any{"cmd": "power_profile", "action": "start", "sample_rate_hz": 1000}); msg != "sample_rate_hz must be 100..500" {
+		t.Fatal(msg)
+	}
+	ok(t, addr, map[string]any{"cmd": "can_start", "bitrate": 500000})
+	ok(t, addr, map[string]any{"cmd": "can_stop"})
+	for _, old := range []string{"can_config", "can_disable"} {
+		if msg := refused(t, addr, map[string]any{"cmd": old}); msg != "BP0002 cmd="+old {
+			t.Fatalf("%s: %s", old, msg)
+		}
+	}
+}

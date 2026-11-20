@@ -53,7 +53,7 @@ func byteArray(v any) []int {
 	return out
 }
 
-func (s *Sim) cmdCanConfig(r request) (any, error) {
+func (s *Sim) cmdCanStart(r request) (any, error) {
 	bitrate := r.int("bitrate", 500000)
 	mode := "normal"
 	if r.has("mode") {
@@ -117,7 +117,7 @@ func (s *Sim) cmdCanRead(r request) (any, error) {
 	n := min(want, len(c.rx))
 	frames := []any{}
 	for _, f := range c.rx[:n] {
-		frames = append(frames, map[string]any{"id": f.id, "ext": f.ext, "rtr": f.rtr, "dlc": len(f.data), "data": f.data, "ts": f.ts})
+		frames = append(frames, map[string]any{"id": f.id, "ext": f.ext, "rtr": f.rtr, "dlc": len(f.data), "data": f.data, "ts_ms": f.ts})
 	}
 	c.rx = append(c.rx[:0], c.rx[n:]...)
 	return map[string]any{"frames": frames, "overflow": c.overflow}, nil
@@ -170,7 +170,7 @@ func (s *Sim) cmdCanTerm(r request) (any, error) {
 	return map[string]any{"term": on}, nil
 }
 
-func (s *Sim) cmdCanDisable(request) (any, error) {
+func (s *Sim) cmdCanStop(request) (any, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pod.can.enabled = false

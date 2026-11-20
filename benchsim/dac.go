@@ -116,7 +116,7 @@ func (s *Sim) dacLimitsCheck(cmd string, r request) string {
 	case "dac_out":
 		path := r.str("path")
 		why := route(path)
-		v, ok := r.num("volts")
+		v, ok := r.num("v")
 		if why == "" && ok && pathIndex(path) == l.path {
 			if v < float64(l.minMv)/1000-0.005 || v > float64(l.maxMv)/1000+0.005 {
 				return fmt.Sprintf("refused: %s; %d mV is outside them", l.describe(), int(math.Round(v*1000)))
@@ -678,7 +678,7 @@ func (s *Sim) cmdLoopInput(c *conn, r request) (any, error) {
 	now := s.now()
 	s.advance(now)
 	s.pod.loopSrc, s.pod.loopIn, s.pod.loopStep = src, in, step
-	return map[string]any{"source": src, "input": in, "step": step, "v": int(s.pod.analog.dac.codeAt(now))}, nil
+	return map[string]any{"source": src, "input": in, "step": step, "code16": int(s.pod.analog.dac.codeAt(now))}, nil
 }
 
 func (s *Sim) cmdLoopProbe(c *conn, _ request) (any, error) {
@@ -701,7 +701,7 @@ func (s *Sim) cmdLoopProbe(c *conn, _ request) (any, error) {
 	if d.loop != nil {
 		in, tripped = d.loop.in, d.loop.tripped
 	}
-	return map[string]any{"i": s.adcCount(now), "in": in, "source": s.pod.loopSrc, "v": int(math.Round(d.codeAt(now))), "tripped": tripped}, nil
+	return map[string]any{"i": s.adcCount(now), "in": in, "source": s.pod.loopSrc, "code16": int(math.Round(d.codeAt(now))), "tripped": tripped}, nil
 }
 
 func (s *Sim) cmdCurrentOut(r request) (any, error) {

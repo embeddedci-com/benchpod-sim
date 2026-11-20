@@ -260,24 +260,24 @@ func (s *Sim) cmdDacOut(r request) (any, error) {
 	}
 	if p == "off" {
 		d.path = "off"
-		return map[string]any{"path": "off", "mv": 0, "code": -1}, nil
+		return map[string]any{"path": "off", "mv": 0}, nil
 	}
 	d.path = p
-	if v, has := r.num("volts"); has || r.has("volts") {
+	if v, has := r.num("v"); has || r.has("v") {
 		line := s.dacLineFor(idx)
 		if !s.firmware {
 			rng := dacRange[p]
 			if !has || v < rng[0]-1e-9 || v > rng[1]+1e-9 {
-				return nil, errf("volts out of range for %s (%g..%g V)", p, rng[0], rng[1])
+				return nil, errf("v out of range for %s (%g..%g V)", p, rng[0], rng[1])
 			}
 		}
 		code := max(0, min(int(math.Round((v-line.a)/line.b*256)), 65535))
 		got := line.volts(float64(code))
 		*d = dacState{path: p, code: float64(code)}
 		return map[string]any{"path": name, "mv": int(math.Round(got * 1000)), "uv": int64(math.Round(got * 1e6)),
-			"code": min((code+128)>>8, 255), "code16": code}, nil
+			"code16": code}, nil
 	}
-	return map[string]any{"path": name, "mv": 0, "code": -1}, nil
+	return map[string]any{"path": name, "mv": 0}, nil
 }
 
 func (s *Sim) cmdAdcRead(r request) (any, error) {

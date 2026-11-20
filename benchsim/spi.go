@@ -53,9 +53,9 @@ func (s *Sim) cmdSpiStart(r request) (any, error) {
 			}
 		}
 	}
-	hz := r.int("hz", 1000000)
+	hz := r.int("clock_hz", 1000000)
 	if hz <= 0 {
-		return nil, fwError("invalid hz")
+		return nil, fwError("invalid clock_hz")
 	}
 	mode := r.int("mode", 0)
 	if mode != 0 && mode != 3 {
@@ -80,7 +80,7 @@ func (s *Sim) cmdSpiStart(r request) (any, error) {
 	half := max(1, 24000000/hz/2)
 	got := 24000000 / (2 * half)
 	s.pod.spi = &spiMaster{sck: v[0], mosi: v[1], miso: v[2], cs: v[3], hz: got, mode: mode}
-	return map[string]any{"sck": v[0], "mosi": v[1], "miso": v[2], "cs": v[3], "hz": got, "mode": mode}, nil
+	return map[string]any{"sck": v[0], "mosi": v[1], "miso": v[2], "cs": v[3], "clock_hz": got, "mode": mode}, nil
 }
 
 func (s *Sim) cmdSpiStop(request) (any, error) {
@@ -98,7 +98,7 @@ func (s *Sim) cmdSpiStatus(request) (any, error) {
 	if m == nil {
 		return map[string]any{"active": false}, nil
 	}
-	return map[string]any{"active": true, "sck": m.sck, "mosi": m.mosi, "miso": m.miso, "cs": m.cs, "hz": m.hz, "mode": m.mode, "cs_held": m.csHeld}, nil
+	return map[string]any{"active": true, "sck": m.sck, "mosi": m.mosi, "miso": m.miso, "cs": m.cs, "clock_hz": m.hz, "mode": m.mode, "cs_held": m.csHeld}, nil
 }
 
 // flashExchange is the W25Q on the wire for one CS-low stretch: it answers tx and, when CS rises,
