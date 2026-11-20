@@ -97,6 +97,7 @@ type podFlash struct {
 	dacCal                 [3]*dacLine
 	adcGain                [3]*float64
 	chip                   spiFlashChip
+	wiring                 wiringStore
 }
 
 func (p *podState) init() {
