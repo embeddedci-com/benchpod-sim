@@ -180,7 +180,7 @@ func laFrames(c *conn, edges [][2]int, n int, rate float64, first map[string]any
 
 func (s *Sim) cmdLaCapture(c *conn, r request) error {
 	fail := func(err error) error {
-		_ = c.send(errReply(err.Error()))
+		_ = c.send(errorReply(err))
 		return err
 	}
 	s.mu.Lock()
@@ -236,7 +236,7 @@ func (s *Sim) cmdLaCapture(c *conn, r request) error {
 // and only catches one by chance.
 func (s *Sim) cmdSensorLa(c *conn, r request) error {
 	fail := func(err error) error {
-		_ = c.send(errReply(err.Error()))
+		_ = c.send(errorReply(err))
 		return err
 	}
 	s.mu.Lock()
@@ -381,7 +381,7 @@ func sendAdc(c *conn, counts []int, rate float64, b64, final bool) error {
 
 func (s *Sim) cmdCapture(c *conn, r request) error {
 	fail := func(err error) error {
-		_ = c.send(errReply(err.Error()))
+		_ = c.send(errorReply(err))
 		return err
 	}
 	n := r.int("samples", 256)
@@ -416,7 +416,7 @@ func (s *Sim) cmdCapture(c *conn, r request) error {
 // ADC capture and the correlated capture.
 func (s *Sim) cmdCaptureDual(c *conn, r request) error {
 	fail := func(err error) error {
-		_ = c.send(errReply(err.Error()))
+		_ = c.send(errorReply(err))
 		return err
 	}
 	na, nl := r.int("adc_samples", 0), r.int("la_samples", 0)
@@ -558,7 +558,7 @@ func (s *Sim) cmdCaptureRead(c *conn, r request) error {
 	lc := s.pod.lastCap
 	s.mu.Unlock()
 	fail := func(err error) error {
-		_ = c.send(errReply(err.Error()))
+		_ = c.send(errorReply(err))
 		return err
 	}
 	if lc == nil {

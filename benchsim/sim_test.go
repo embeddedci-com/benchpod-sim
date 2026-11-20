@@ -3,10 +3,12 @@ package benchsim
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"math"
 	"net"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -26,8 +28,16 @@ func startSim(t *testing.T, opts ...Option) (*Sim, string) {
 }
 
 // frames sends one command on a fresh connection and reads reply lines until "more" is false.
+// It sends "client_api":2 as the 4.0 clients do, unless req has its own.
 func frames(t *testing.T, addr string, req map[string]any) []map[string]any {
 	t.Helper()
+	if _, has := req["client_api"]; !has {
+		withAPI := map[string]any{"client_api": 2}
+		for k, v := range req {
+			withAPI[k] = v
+		}
+		req = withAPI
+	}
 	c, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatal(err)
@@ -66,14 +76,32 @@ func ok(t *testing.T, addr string, req map[string]any) any {
 	return r["data"]
 }
 
-// refused sends a command that must fail and returns its message.
+// refused sends a command that must fail and returns its message, or for a coded refusal its
+// short form ("BP0031 la=4 owner=gpio", args sorted by key).
 func refused(t *testing.T, addr string, req map[string]any) string {
 	t.Helper()
 	r := frames(t, addr, req)[0]
 	if r["status"] != "error" {
 		t.Fatalf("%v: want an error, got %v", req, r)
 	}
+	if code, _ := r["code"].(string); code != "" {
+		return shortForm(code, r["args"])
+	}
 	return r["message"].(string)
+}
+
+func shortForm(code string, args any) string {
+	m, _ := args.(map[string]any)
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := code
+	for _, k := range keys {
+		out += fmt.Sprintf(" %s=%v", k, m[k])
+	}
+	return out
 }
 
 // console is a UART proxy session on the node's console.
@@ -90,7 +118,7 @@ func openConsole(t *testing.T, addr string) *console {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = c.Close() })
-	_, _ = c.Write([]byte(`{"cmd":"uart_proxy_start","rx":3,"tx":4,"baud":115200}` + "\n"))
+	_, _ = c.Write([]byte(`{"cmd":"uart_proxy_start","rx":3,"tx":4,"baud":115200,"client_api":2}` + "\n"))
 	ack := make([]byte, 0, 64)
 	one := make([]byte, 1)
 	for {
@@ -162,7 +190,7 @@ func TestStatusAndLaVoltage(t *testing.T) {
 	if msg := refused(t, addr, map[string]any{"cmd": "dap_start", "swclk": 11, "swdio": 12}); !strings.Contains(msg, "not available in the demo simulator") {
 		t.Fatal(msg)
 	}
-	if msg := refused(t, addr, map[string]any{"cmd": "frobnicate"}); msg != "unknown command: frobnicate" {
+	if msg := refused(t, addr, map[string]any{"cmd": "frobnicate"}); msg != "BP0002 cmd=frobnicate" {
 		t.Fatal(msg)
 	}
 }
@@ -394,7 +422,7 @@ func TestCloseEndsEveryConnection(t *testing.T) {
 	go func() {
 		c, err := net.Dial("tcp", addr)
 		if err == nil {
-			_, _ = c.Write([]byte(`{"cmd":"power_profile","efuse":1,"duration_ms":60000}` + "\n"))
+			_, _ = c.Write([]byte(`{"cmd":"power_profile","efuse":1,"duration_ms":60000,"client_api":2}` + "\n"))
 		}
 	}()
 	time.Sleep(200 * time.Millisecond)

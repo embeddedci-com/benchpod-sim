@@ -21,7 +21,7 @@ const proxyPoll = 5 * time.Millisecond
 
 func (s *Sim) cmdUartProxy(c *conn, r request) error {
 	fail := func(err error) error {
-		_ = c.send(errReply(err.Error()))
+		_ = c.send(errorReply(err))
 		return err
 	}
 	if !r.has("rx") {

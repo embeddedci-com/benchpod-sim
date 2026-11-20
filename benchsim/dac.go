@@ -333,7 +333,7 @@ func (s *Sim) generate16Codes(r request) (amp, mid float64, path string, err err
 // cmdLoadBin is handle_load_bin and load_bin_receive: raw bytes, then JSON again on the connection.
 func (s *Sim) cmdLoadBin(c *conn, r request) error {
 	fail := func(err error) error {
-		_ = c.send(errReply(err.Error()))
+		_ = c.send(errorReply(err))
 		return err
 	}
 	if !r.has("total") {

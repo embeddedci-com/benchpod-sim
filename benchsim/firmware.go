@@ -195,7 +195,12 @@ func (s *Sim) fwDispatch(c *conn, r request) {
 	}
 	fail := func(err error) {
 		note(err)
-		_ = c.send(errReply(err.Error()))
+		_ = c.send(errorReply(err))
+	}
+	// A client older than min_client_api is refused first, before every other gate.
+	if err := clientAPIGate(cmd, r); err != nil {
+		fail(err)
+		return
 	}
 	s.mu.Lock()
 	lanPolicy := s.flash.lanPolicy
@@ -203,7 +208,7 @@ func (s *Sim) fwDispatch(c *conn, r request) {
 	s.mu.Unlock()
 	if !c.cloud {
 		if tier >= 2 && lanPolicy != "open" {
-			fail(errf("locked: %s needs the cloud or USB", cmd))
+			fail(coded(codeLanLocked, "cmd", cmd))
 			return
 		}
 		light := known && row.flags&flagHeavy == 0 && tier == 0
@@ -211,12 +216,12 @@ func (s *Sim) fwDispatch(c *conn, r request) {
 			if holder == "" {
 				holder = "cloud"
 			}
-			fail(errf("busy: a cloud job holds this pod (%s, %d s left)", holder, left))
+			fail(coded(codeLeaseBusy, "holder", "a cloud job", "purpose", holder, "left_s", left))
 			return
 		}
 	}
 	if c.maxTier >= 0 && tier > c.maxTier {
-		fail(errf("forbidden: %s needs an organization owner or admin", cmd))
+		fail(coded(codeRoleRequired, "cmd", cmd))
 		return
 	}
 	if c.single && row.flags&flagStream != 0 {
@@ -247,14 +252,14 @@ func (s *Sim) fwDispatch(c *conn, r request) {
 	}
 	switch {
 	case !known:
-		fail(fwError("unknown cmd"))
+		fail(coded(codeUnknownCommand, "cmd", cmd))
 	case row.raw != nil:
 		note(row.raw(s, c, r))
 	case row.fn != nil:
 		data, err := row.fn(s, c, r)
 		note(err)
 		if err != nil {
-			_ = c.send(errReply(err.Error()))
+			_ = c.send(errorReply(err))
 			return
 		}
 		_ = c.send(okReply(data))
@@ -370,8 +375,24 @@ func (b *bufConn) SetReadDeadline(time.Time) error  { return nil }
 func (b *bufConn) SetWriteDeadline(time.Time) error { return nil }
 
 // Exec runs one command as a single-reply caller: over the cloud command channel (cloud true,
-// streaming verbs refused) or as a LAN client. The data is the reply's data, or errMsg its refusal.
+// streaming verbs refused) or as a LAN client. The data is the reply's data, or errMsg its refusal:
+// the message, or the code ("BP0031") of a coded one, as the cloud envelope's "error" carries it.
 func (s *Sim) Exec(req map[string]any, cloud bool) (data json.RawMessage, errMsg string) {
+	r := s.ExecReply(req, cloud)
+	return r.Data, r.Error
+}
+
+// Reply is one command's single reply: Data when it ran, else Error (the message, or the code
+// when there is none) with Code and Args for a coded refusal.
+type Reply struct {
+	Data  json.RawMessage
+	Error string
+	Code  string
+	Args  map[string]any
+}
+
+// ExecReply is Exec with the refusal's code and args, for the cloud envelope.
+func (s *Sim) ExecReply(req map[string]any, cloud bool) Reply {
 	s.mu.Lock()
 	cn := s.cmdConn
 	s.mu.Unlock()
@@ -385,21 +406,27 @@ func (s *Sim) Exec(req map[string]any, cloud bool) (data json.RawMessage, errMsg
 	var r struct {
 		Status  string          `json:"status"`
 		Message string          `json:"message"`
+		Code    string          `json:"code"`
+		Args    map[string]any  `json:"args"`
 		Data    json.RawMessage `json:"data"`
 	}
 	if json.Unmarshal(line, &r) != nil {
-		return nil, "reply too large for the cloud channel"
+		return Reply{Error: "BP0054", Code: "BP0054", Args: map[string]any{"bytes": len(line), "limit": 1791}}
 	}
 	if r.Status == "error" {
-		return nil, r.Message
+		msg := r.Message
+		if msg == "" {
+			msg = r.Code
+		}
+		return Reply{Error: msg, Code: r.Code, Args: r.Args}
 	}
-	return r.Data, ""
+	return Reply{Data: r.Data}
 }
 
 // heavyBegin is heavy_begin: one owner of the capture hardware at a time. Callers hold s.mu.
 func (s *Sim) heavyBegin(c *conn) error {
 	if s.heavyInFlight() || (s.pod.heavy != nil && s.pod.heavy != c.heavyKey()) {
-		return fwError("busy")
+		return coded(codePodBusy)
 	}
 	s.pod.heavy = c.heavyKey()
 	return nil

@@ -26,7 +26,7 @@ func achievedRate(req float64) float64 {
 
 func (s *Sim) cmdPowerProfile(c *conn, r request) error {
 	fail := func(err error) error {
-		_ = c.send(errReply(err.Error()))
+		_ = c.send(errorReply(err))
 		return err
 	}
 	action := r.str("action")
