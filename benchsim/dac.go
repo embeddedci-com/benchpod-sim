@@ -226,37 +226,35 @@ func (s *Sim) cmdDacSet(r request) (any, error) {
 	return nil, nil
 }
 
-// cmdGenerateFw is handle_generate: the 8-bit levels form (no routing) and the calibrated 16-bit
-// form (volts on a path, or microamps on the 4-20 mA output).
+// errGenerateLevels is generate without a calibrated level: firmware 4.0.0 takes no 8-bit
+// amplitude/offset.
+const errGenerateLevels = fwError("amplitude_v (with path and offset_v) or amplitude_ua (with offset_ua) is required")
+
+// cmdGenerateFw is handle_generate: volts on a path, or microamps on the 4-20 mA output, built at
+// the DAC's 16 bits. The reply is null, or {"cotrig":bool} with on_capture.
 func (s *Sim) cmdGenerateFw(_ *conn, r request) (any, error) {
 	wave := r.str("waveform")
 	freq := 1000.0
-	if v, ok := r.num("freq"); ok {
+	if v, ok := r.num("freq_hz"); ok {
 		freq = v
 	}
 	durMs := r.int("duration_ms", 0)
-	sixteen := r.has("amplitude_v") || r.has("amplitude_ua")
 	if wave != "sine" && wave != "square" && wave != "sawtooth" {
 		return nil, fwError("unknown waveform")
 	}
-	if freq <= 0 {
-		return nil, fwError("generate failed")
+	if !r.has("amplitude_v") && !r.has("amplitude_ua") {
+		return nil, errGenerateLevels
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
 	s.advance(now)
-	var amp, mid float64
-	path := ""
-	if sixteen {
-		var err error
-		amp, mid, path, err = s.generate16Codes(r)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		amp = float64(r.int("amplitude", 127)) * 256
-		mid = float64(r.int("offset", 128)) * 256
+	amp, mid, path, err := s.generate16Codes(r)
+	if err != nil {
+		return nil, err
+	}
+	if freq <= 0 {
+		return nil, fwError("generate failed")
 	}
 	s.snapshotAnalog(now)
 	a := &s.pod.analog
@@ -272,12 +270,7 @@ func (s *Sim) cmdGenerateFw(_ *conn, r request) (any, error) {
 	cotrigAsked := r.flag("on_capture")
 	nd.armed = cotrigAsked
 	a.dac = nd
-	switch {
-	case sixteen && cotrigAsked:
-		return map[string]any{"bits": 16, "cotrig": true}, nil
-	case sixteen:
-		return map[string]any{"bits": 16}, nil
-	case cotrigAsked:
+	if cotrigAsked {
 		return map[string]any{"cotrig": true}, nil
 	}
 	return nil, nil

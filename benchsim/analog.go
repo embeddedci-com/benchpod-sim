@@ -335,9 +335,15 @@ func (s *Sim) cmdGenerate(r request) (any, error) {
 	default:
 		return nil, fwError("waveform must be sine|square|sawtooth")
 	}
-	freq, ok := r.num("freq")
-	if !ok || freq <= 0 || freq > 100000 {
-		return nil, fwError("freq must be 0 < freq <= 100000 Hz")
+	freq := 1000.0
+	if v, ok := r.num("freq_hz"); ok {
+		freq = v
+	}
+	if freq <= 0 || freq > 100000 {
+		return nil, fwError("freq_hz must be 0 < freq_hz <= 100000")
+	}
+	if !r.has("amplitude_v") && !r.has("amplitude_ua") {
+		return nil, errGenerateLevels
 	}
 	if r.has("amplitude_ua") {
 		return nil, notInDemo("the 4-20 mA output")
@@ -345,15 +351,15 @@ func (s *Sim) cmdGenerate(r request) (any, error) {
 	path := r.str("path")
 	rng, ok := dacRange[path]
 	if !ok {
-		if r.has("amplitude") {
-			return nil, fwError("this firmware takes amplitude_v/offset_v with a path")
-		}
-		return nil, fwError("path must be 3v3|5v|12v")
+		return nil, fwError("path must be 3v3|5v|12v with amplitude_v")
 	}
 	amp, ok1 := r.num("amplitude_v")
 	off, ok2 := r.num("offset_v")
-	if !ok1 || !ok2 || amp <= 0 {
-		return nil, fwError("missing amplitude_v/offset_v")
+	if !ok2 {
+		return nil, fwError("offset_v is required with amplitude_v")
+	}
+	if !ok1 || amp <= 0 {
+		return nil, fwError("amplitude_v must be above 0 V")
 	}
 	slack := (rng[1] - rng[0]) * 0.05
 	if off-amp < rng[0]-slack || off+amp > rng[1]+slack {
@@ -373,6 +379,8 @@ func (s *Sim) cmdGenerate(r request) (any, error) {
 	}
 	s.snapshotAnalog(now)
 	s.pod.analog.dac = d
-	return map[string]any{"running": true, "bits": 16, "path": path, "freq": freq, "cotrig": false,
-		"sample_rate_hz": 888888}, nil
+	if r.flag("on_capture") { // the demo has no co-trigger: the waveform starts now
+		return map[string]any{"cotrig": false}, nil
+	}
+	return nil, nil
 }

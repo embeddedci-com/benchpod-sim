@@ -180,3 +180,28 @@ func TestLaPullAndBooleans(t *testing.T) {
 		t.Fatalf("target_status: %v", e1)
 	}
 }
+
+// generate takes only volts on a path or microamps (no 8-bit amplitude/offset), freq_hz, and
+// replies null or {"cotrig":bool}.
+func TestGenerateForms(t *testing.T) {
+	for _, fw := range []bool{true, false} {
+		var opts []Option
+		if fw {
+			opts = append(opts, WithFirmware("4.0.0", Hooks{}))
+		}
+		_, addr := startSim(t, opts...)
+		msg := refused(t, addr, map[string]any{"cmd": "generate", "waveform": "sine", "freq_hz": 100, "amplitude": 100, "offset": 128})
+		if msg != "amplitude_v (with path and offset_v) or amplitude_ua (with offset_ua) is required" {
+			t.Fatalf("firmware %v: 8-bit form: %s", fw, msg)
+		}
+		req := map[string]any{"cmd": "generate", "waveform": "sine", "freq_hz": 100, "path": "3v3", "amplitude_v": 1, "offset_v": 1.65}
+		if d := ok(t, addr, req); d != nil {
+			t.Fatalf("firmware %v: generate: %v", fw, d)
+		}
+		req["on_capture"] = true
+		if d, _ := ok(t, addr, req).(map[string]any); d == nil || d["cotrig"] == nil || d["bits"] != nil {
+			t.Fatalf("firmware %v: generate on_capture: %v", fw, d)
+		}
+		ok(t, addr, map[string]any{"cmd": "dac_stop"})
+	}
+}
