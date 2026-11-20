@@ -171,8 +171,9 @@ func TestStatusAndLaVoltage(t *testing.T) {
 	if st["version"] != podFirmware || st["board"] != podBoard {
 		t.Fatalf("status: %v", st)
 	}
-	if !strings.Contains(strings.Join(toStrings(st["caps"]), ","), "sensors") || st["sensors_format"] != 1.0 {
-		t.Fatalf("caps: %v", st["caps"])
+	if _, has := st["caps"]; has || st["api"] != 2.0 || st["min_client_api"] != 2.0 || st["features_rev"] != 11.0 ||
+		st["fpga_image"] != "loop" || st["sig_policy"] != "required" {
+		t.Fatalf("status levels: %v", st)
 	}
 	if ok(t, addr, map[string]any{"cmd": "ping"}) != "pong" {
 		t.Fatal("ping")

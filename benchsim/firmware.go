@@ -469,19 +469,21 @@ func (s *Sim) fwStatus(c *conn, _ request) (any, error) {
 	out := map[string]any{
 		"device": "benchpod", "version": version, "board": podBoard, "net": "connected", "ip": "127.0.0.1",
 		"rssi_dbm": nil, "wifi": "off", "cloud": s.cloudState(),
-		"usb":        map[string]any{"net": "off", "setting": "on", "off_reason": "wifi", "link": false, "ip": "", "host_ip": "", "source": "3.0A", "source_ma": 3000},
+		"usb": map[string]any{"net": false, "enabled": s.flash.usbNet, "off_reason": "wifi", "link": false, "ip": "",
+			"host_ip": "", "source": "3.0A", "source_ma": 3000},
 		"rx_dropped": 0, "tx_dropped": 0, "adc_bits": 16, "adc_fullscale_mv": 4096, "adc_channels": 1,
 		"la_vccio_mv": s.pod.laMV, "board_rev": "v3", "board_rev_mv": 1650, "nrst_pin": true, "flash_kb": 2048,
-		"ota_sig": true, "sig_policy": s.flash.sigPolicy, "sig_keys": 1, "sig_policy_cmd": true,
-		"lan_policy": s.flash.lanPolicy, "lan_policy_cmd": true, "tunnel_max_tier": true, "lease_state": true,
-		"cloud_ca": true, "cloud_proxy": true,
-		"lan_tls":           map[string]any{"port": 8443, "https_only": false, "sha256": ""},
+		"sig_policy": s.flash.sigPolicy, "sig_keys": 1, "lan_policy": s.flash.lanPolicy,
+		"lan_tls":           map[string]any{"port": 8443, "https_only": !s.flash.httpsOff, "scpi": s.flash.scpi, "sha256": ""},
 		"lease":             map[string]any{"held": held, "holder": holder, "left_s": left},
+		"local_lease":       map[string]any{"held": false},
 		"gateware":          podGateware,
 		"gateware_embedded": podGateware, "loop_tripped": s.loopTripped(), "uart_rx_overflow": false,
 		"psram": "ok", "psram_ok": true, "heap_free": 120000, "heap_min": 90000, "stack_min": 800,
 		"reset": "power-on", "last_crash": "none", "stacks": map[string]any{}, "analog": true,
-		"safe_mode": false, "safe_reason": "", "caps": s.capsList(), "sensors_format": 1, "sensors_digital": true,
+		"safe_mode": false, "safe_reason": "", "sensors_digital": true,
+		"features_rev": featuresRev, "api": apiLevel, "min_client_api": minClientAPI,
+		"fpga_image": fpgaImageName(s.pod.image), "hw": podHW,
 	}
 	if !c.single {
 		out["adc_cal_a_uv"] = int64(math.Round(adcCalA * 1e6))
@@ -502,22 +504,6 @@ func (s *Sim) cloudState() string {
 
 func adcFullscaleMv() int64 { return int64(math.Round(math.Abs(adcCalB) * 32768 * 1000)) }
 
-// capsList is cloud_caps_emit_list for an analog board on the running gateware image.
-func (s *Sim) capsList() []string {
-	caps := []string{"signal", "gpio", "power", "swd", "uart", "la", "analyzer", "command",
-		"tunnel", "ota", "la_pins", "power_profile", "capture_b64", "can", "sensors", "usb_net",
-		"usb_net_setting", "lan_tls", "wifi_scan", "pod_current", "analog", "scope", "dac_limits", "calibrate",
-		"cal_dmm", "current_out", "dac", "dac_dc", "dac_replay"}
-	switch s.pod.image {
-	case 0:
-		caps = append(caps, "dac_control_loop")
-	case 1:
-		caps = append(caps, "dac_deep_replay")
-	}
-	return append(caps, "dac_cotrig", "generate16", "dac_loop_sources", "dac_loop_input_map", "gpio_read",
-		"capture_trigger", "spi_master", "spi_stream", "nrst_pin", "usb_cc")
-}
-
 // Capabilities is the firmware's capabilities frame (cloud_caps.c), without device_id and the
 // boot health the link side adds.
 func (s *Sim) Capabilities() map[string]any {
@@ -527,27 +513,24 @@ func (s *Sim) Capabilities() map[string]any {
 	if version == "" {
 		version = podFirmware
 	}
-	deep := s.pod.image == 1
 	maxSamples := 2048
-	if deep {
+	if s.pod.image == 1 {
 		maxSamples = 4 << 20
 	}
+	// Firmware 4.0.0 sends no per-feature flags: the server looks the features up from
+	// features_rev, the gateware, the image and the facts. What is left are values.
 	return map[string]any{
-		"firmware_version": version, "ota": true, "flash_kb": 2048, "blob_slots": true, "ota_sig": true,
-		"sig_policy": s.flash.sigPolicy, "sig_policy_cmd": true, "ws_auth_v2": true, "lease_state": true,
-		"cloud_ca": true, "cloud_proxy": true, "lan_policy": s.flash.lanPolicy, "lan_policy_cmd": true,
-		"tunnel_max_tier": true, "lan_tls": true, "wifi_scan": true, "serial": false, "scope": true, "analog": true,
-		"analyzer": true, "command": true, "tunnel": true, "adc_bits": 16, "adc_fullscale_mv": 4096, "adc_channels": 1,
+		"firmware_version": version, "flash_kb": 2048, "sig_policy": s.flash.sigPolicy, "ws_auth_v2": true,
+		"lan_policy": s.flash.lanPolicy, "features_rev": featuresRev, "api": apiLevel, "min_client_api": minClientAPI,
+		"gateware_version": podGateware, "fpga_image": fpgaImageName(s.pod.image),
+		"analog": true, "nrst_pin": true, "sensors_digital": true, "wifi_scan": true, "pod_current": true,
+		"adc_low_range": false, "adc_bits": 16, "adc_fullscale_mv": 4096, "adc_channels": 1,
 		"adc_cal_a_uv": int64(math.Round(adcCalA * 1e6)), "adc_cal_b_nv": int64(math.Round(adcCalB * 1e9)),
-		"adc_cal_unwrap": true, "adc_low_range": false, "adc_range": "normal", "adc_range_fs_mv": adcFullscaleMv(),
-		"dac": true, "dac_replay": true, "dac_dc": true, "dac_bits": 8, "dac_replay_bits": 16,
-		"dac_fullscale_mv": 4096, "dac_channels": 1, "dac_deep_replay": deep, "dac_replay_max_samples": maxSamples,
-		"dac_control_loop": s.pod.image == 0, "dac_loop_sources": true, "dac_loop_input_map": true, "dac_cotrig": true,
-		"generate_bits": 16, "la_pins": true, "gpio_read": true, "capture_trigger": true, "spi_master": true,
-		"spi_stream": true, "nrst_pin": true, "power_profile": true, "capture_b64": true, "dac_limits": true,
-		"calibrate": true, "cal_dmm": true, "can": true, "pod_current": true, "current_out": true,
-		"current_out_min_ua": currentOutUa(0), "current_out_max_ua": currentOutUa(0xFFFF), "sensors": true,
-		"sensors_format": 1, "sensors_digital": true, "board": podBoard, "uplink": "eth",
+		"adc_cal_unwrap": true, "adc_range": "normal", "adc_range_fs_mv": adcFullscaleMv(),
+		"dac_bits": 8, "dac_replay_bits": 16, "dac_fullscale_mv": 4096, "dac_channels": 1,
+		"dac_replay_max_samples": maxSamples, "generate_bits": 16, "la_max_rate_hz": 48000000,
+		"current_out_min_ua": currentOutUa(0), "current_out_max_ua": currentOutUa(0xFFFF),
+		"board": podBoard, "uplink": "eth",
 	}
 }
 

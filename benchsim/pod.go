@@ -8,7 +8,7 @@ import (
 
 // What the simulated pod reports about itself: a rev3 analog BenchPod on current firmware.
 const (
-	podFirmware = "3.10.3"
+	podFirmware = "4.0.0"
 	podBoard    = "stm32h563"
 	podGateware = 54
 	// The front-SMA ADC fit (cal_data.h ADC_CAL_EXT): volts = a + b*count, 16-bit unwrapped.
@@ -16,13 +16,22 @@ const (
 	adcCalB = -0.0010026443
 )
 
-// podCaps is the caps[] list of status: the features the simulator implements. The SDK turns a
-// missing flag into a clear "needs newer pod firmware" refusal, so leaving out what is not
-// simulated (CAN, SPI, OTA, calibration, the 4-20 mA output) fails cleanly on the host.
-var podCaps = []string{
-	"scope", "la", "uart", "analog", "command", "dac", "dac_dc", "generate16", "la_pins",
-	"gpio_read", "capture_trigger", "power_profile", "capture_b64", "nrst_pin", "sensors",
-	"pod_current",
+// podHW are the hardware facts status and the capabilities frame send (features.toml [facts]):
+// clients look the pod's features up in the features table from features_rev, the gateware, the
+// image and these. Firmware 4.0.0 sends no caps list.
+var podHW = []string{"wifi", "usb_cc", "pod_current"}
+
+// fpgaImageName is the running gateware image as status and the capabilities frame name it.
+func fpgaImageName(image int) string {
+	switch image {
+	case 0:
+		return "loop"
+	case 1:
+		return "deep"
+	case 2:
+		return "emu"
+	}
+	return "unknown"
 }
 
 type efuseState struct{ enabled, fault bool }
@@ -74,16 +83,18 @@ type leaseState struct {
 // podFlash is what the firmware keeps in flash across a reset.
 type podFlash struct {
 	lanPolicy, sigPolicy string
-	limits               *dacLimits
-	proxyHost            string
-	proxyPort            int
-	proxyUser, proxyPass string
-	caCerts              []map[string]any
-	calOffsetUV          int64
-	calSet               bool
-	dacCal               [3]*dacLine
-	adcGain              [3]*float64
-	chip                 spiFlashChip
+	// usbNet is usb_network enabled; httpsOff is lan_tls https_only false; scpi is lan_tls scpi.
+	usbNet, httpsOff, scpi bool
+	limits                 *dacLimits
+	proxyHost              string
+	proxyPort              int
+	proxyUser, proxyPass   string
+	caCerts                []map[string]any
+	calOffsetUV            int64
+	calSet                 bool
+	dacCal                 [3]*dacLine
+	adcGain                [3]*float64
+	chip                   spiFlashChip
 }
 
 func (p *podState) init() {
@@ -147,11 +158,13 @@ func (s *Sim) cmdStatus(request) (any, error) {
 		"adc_bits": 16, "adc_fullscale_mv": 4096, "adc_channels": 1, "la_vccio_mv": s.pod.laMV,
 		"adc_cal_a_uv": int64(math.Round(adcCalA * 1e6)), "adc_cal_b_nv": int64(math.Round(adcCalB * 1e9)),
 		"adc_cal_unwrap": true, "nrst_pin": true, "flash_kb": 2048, "analog": true,
-		"lan_policy": "open", "lan_policy_cmd": true, "lease_state": true,
-		"lease":    map[string]any{"held": false, "holder": "", "left_s": 0},
-		"gateware": podGateware, "gateware_embedded": podGateware,
+		"sig_policy": "required", "sig_keys": 1, "lan_policy": "open",
+		"lease":       map[string]any{"held": false, "holder": "", "left_s": 0},
+		"local_lease": map[string]any{"held": false},
+		"gateware":    podGateware, "gateware_embedded": podGateware,
 		"uptime_ms": s.now() / 1e6, "reset": "power-on", "last_crash": "none", "safe_mode": false,
-		"caps": podCaps, "sensors_format": 1, "sensors_digital": true,
+		"sensors_digital": true, "features_rev": featuresRev, "api": apiLevel, "min_client_api": minClientAPI,
+		"fpga_image": fpgaImageName(s.pod.image), "hw": podHW,
 		"simulator": "benchsim: a simulated BenchPod wired to a simulated NUCLEO-F446RE process node",
 	}, nil
 }
