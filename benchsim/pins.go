@@ -1,7 +1,6 @@
 package benchsim
 
 import (
-	"fmt"
 	"sort"
 )
 
@@ -18,27 +17,34 @@ var pullOhms = map[int]string{1: "4.7k", 2: "4.7k", 3: "2.2k", 4: "2.2k", 5: "10
 
 func pullDown(la int) bool { return la == 7 || la == 8 }
 
-// releaseHint is the firmware's "how to free it" text for a pin conflict.
-func (s *Sim) releaseHint(la int) string {
-	if on := s.sensorsOn(la); len(on) > 0 {
-		return fmt.Sprintf(`stop the sensor emulation first ({"cmd":"sensor_stop","instance":"%s"})`, on[0].name)
-	}
-	switch fn := s.pod.pins[la].fn; fn {
-	case "gpio":
-		return fmt.Sprintf(`release it with {"cmd":"gpio","la":%d,"mode":"off"}`, la)
-	case "uart_rx", "uart_tx":
-		return "stop the uart proxy first"
-	case "spi_sck", "spi_mosi", "spi_miso", "spi_cs":
-		return `stop the SPI session first ({"cmd":"spi_stop"})`
-	}
-	return ""
-}
-
 func (s *Sim) requireLaVoltage() error {
 	if s.pod.laMV == 0 {
-		return fwError("la voltage not set; set it with la_voltage (mv 1800 or 3300) first")
+		return coded(codeLaVoltageNotSet)
 	}
 	return nil
+}
+
+// pinInUse is BP0031 for a pin another function holds: owner is "gpio" or "sensor:env (i2c_sda)".
+func (s *Sim) pinInUse(la int) error {
+	inst := ""
+	if on := s.sensorsOn(la); len(on) > 0 {
+		inst = on[0].name
+	}
+	return coded(codeLaPinInUse, "la", la, "owner", s.pinOwnerText(la), "function", s.pod.pins[la].fn, "instance", inst)
+}
+
+// noPullDown is why a function cannot share its line with an engaged pull-down (fn_attr's
+// no_pull_down), "" when it can.
+func noPullDown(fn string) string {
+	switch fn {
+	case "uart_rx", "uart_tx", "sensor_tx", "sensor_rx":
+		return "the line idles high"
+	case "i2c_sda", "i2c_scl":
+		return "an open-drain bus needs pull-ups"
+	case "gpio open_drain":
+		return "a released line would read low"
+	}
+	return ""
 }
 
 // claim checks that every channel is free (or already owned by one of the replaceable
@@ -54,14 +60,11 @@ func (s *Sim) checkClaim(fn string, las []int, replaceable ...string) error {
 			free = free || owner == r
 		}
 		if !free {
-			return errf("pin conflict: LA%d is in use by %s; %s", la, s.pinOwnerText(la), s.releaseHint(la))
+			return s.pinInUse(la)
 		}
 		if pullDown(la) && s.pod.pulls&(1<<(la-1)) != 0 {
-			switch fn {
-			case "uart_rx", "uart_tx":
-				return errf("pull conflict: LA%d has its 10k pull-down engaged, which %s can't work with (the line idles high); disable it first", la, fn)
-			case "i2c_sda", "i2c_scl":
-				return errf("pull conflict: LA%d has its 10k pull-down engaged, which %s can't work with (an open-drain bus needs pull-ups); disable it first", la, fn)
+			if why := noPullDown(fn); why != "" {
+				return coded(codeLaPullDownEngaged, "la", la, "ohms", pullOhms[la], "function", fn, "reason", why)
 			}
 		}
 	}
@@ -95,7 +98,7 @@ func (s *Sim) pinEntry(la int) map[string]any {
 		if pullDown(la) {
 			dir = "down"
 		}
-		e["pull"] = map[string]any{"dir": dir, "ohms": ohms, "on": s.pod.pulls&(1<<(la-1)) != 0}
+		e["pull"] = map[string]any{"dir": dir, "ohms": ohms, "on": s.pod.pulls&(1<<(la-1)) != 0, "dirs": []string{dir}}
 	}
 	return e
 }
@@ -183,7 +186,8 @@ func (s *Sim) cmdGpio(r request) (any, error) {
 		}
 		for _, la := range las {
 			if mode == "open_drain" && pullDown(la) && s.pod.pulls&(1<<(la-1)) != 0 {
-				return nil, errf("pull conflict: LA%d has its 10k pull-down engaged, which gpio open_drain can't work with (a released line would read low); disable it first", la)
+				return nil, coded(codeLaPullDownEngaged, "la", la, "ohms", pullOhms[la], "function", "gpio open_drain",
+					"reason", noPullDown("gpio open_drain"))
 			}
 		}
 		lv := level
@@ -214,52 +218,85 @@ func (s *Sim) cmdGpio(r request) (any, error) {
 	return map[string]any{"pins": s.pinList(las)}, nil
 }
 
-// cmdLa is the pull-resistor half of the firmware's `la` command (the step-train form is not
-// simulated).
-func (s *Sim) cmdLa(r request) (any, error) {
+// cmdLaStep is la_step: a step pulse train (firmware up to 3.10.13: la with steps). The
+// simulator checks the request and does not run the train.
+func (s *Sim) cmdLaStep(r request) (any, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.requireLaVoltage(); err != nil {
 		return nil, err
 	}
-	if r.has("steps") {
-		return nil, notInDemo("la step trains")
+	if !r.has("steps") {
+		return nil, fwError("missing steps")
 	}
-	avail := b2i(s.pod.laMV == 3300)
+	if s.firmware {
+		return nil, fwError("la_step is not modeled by the simulator")
+	}
+	return nil, notInDemo("la_step")
+}
+
+// pullDirs is every way LA la can pull: this board has one fixed resistor per channel on LA1-LA8.
+func pullDirs(la int) []string {
+	switch {
+	case la < 1 || la > 8:
+		return []string{}
+	case pullDown(la):
+		return []string{"down"}
+	}
+	return []string{"up"}
+}
+
+// cmdLaPull is la_pull (firmware up to 3.10.13: la without steps): the pull bitmask without
+// "la", a channel's pull state with it, and "pull" up, down or off switches it first.
+func (s *Sim) cmdLaPull(r request) (any, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.requireLaVoltage(); err != nil {
+		return nil, err
+	}
+	avail := s.pod.laMV != 0
 	if !r.has("la") {
 		return map[string]any{"la_pullup_mask": s.pod.pulls, "pullups_available": avail}, nil
 	}
 	la := r.int("la", 0)
-	if la < 1 || la > 8 {
-		return nil, fwError("no pull-up on this la")
+	if la < 1 || la > 14 {
+		return nil, errf("LA%d is not a pin (use 1..14)", max(la, 0))
 	}
-	if r.has("pullup") {
-		v := r.str("pullup")
-		on := v == "on" || v == "1" || v == "true"
-		if on {
-			if s.pod.laMV != 3300 {
-				return nil, fwError("pull-ups are 3V3-referenced; not available with the LA bank at 1.8 V")
+	dirs := pullDirs(la)
+	if r.has("pull") {
+		want := r.str("pull")
+		if want != "up" && want != "down" && want != "off" {
+			return nil, fwError("pull must be up, down or off")
+		}
+		if want != "off" {
+			if len(dirs) == 0 {
+				return nil, coded(codeLaNoPull, "la", la)
 			}
-			if pullDown(la) {
-				switch fn := s.pod.pins[la].fn; fn {
-				case "uart_rx", "uart_tx", "i2c_sda", "i2c_scl", "sensor_tx", "sensor_rx":
-					return nil, errf("pull conflict: LA%d is used by %s, which can't work with the 10k pull-down (stop it first)", la, fn)
+			if want != dirs[0] {
+				return nil, coded(codeLaPullDirection, "la", la, "want", want, "have", dirs[0])
+			}
+			if want == "down" {
+				fn := s.pod.pins[la].fn
+				if fn == "gpio" && s.pod.pins[la].mode == "open_drain" {
+					fn = "gpio open_drain"
+				}
+				if why := noPullDown(fn); why != "" {
+					return nil, coded(codeLaPullDownConflict, "la", la, "ohms", pullOhms[la], "function", fn, "reason", why)
 				}
 			}
 			s.pod.pulls |= 1 << (la - 1)
-		} else {
+		} else if len(dirs) > 0 {
 			s.pod.pulls &^= 1 << (la - 1)
 		}
 		now := s.now()
 		s.advance(now)
 		s.touchBase(now)
 	}
-	dir := "up"
-	if pullDown(la) {
-		dir = "down"
+	state := "off"
+	if len(dirs) > 0 && s.pod.pulls&(1<<(la-1)) != 0 {
+		state = dirs[0]
 	}
-	return map[string]any{"la": la, "pullup": b2i(s.pod.pulls&(1<<(la-1)) != 0), "ohms": pullOhms[la],
-		"pull": dir, "pullups_available": avail}, nil
+	return map[string]any{"la": la, "state": state, "dirs": dirs, "pullups_available": avail}, nil
 }
 
 // baseWord is the idle level of every LA channel right now: what the DUT's pins, the pod's

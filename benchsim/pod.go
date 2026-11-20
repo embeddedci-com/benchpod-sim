@@ -1,8 +1,10 @@
 package benchsim
 
 import (
+	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -178,16 +180,18 @@ func (s *Sim) cmdLaVoltage(r request) (any, error) {
 			return nil, fwError("la voltage must be 1800 or 3300 (mv)")
 		}
 		if mv != s.pod.laMV && s.pod.laMV != 0 {
+			var used []string
 			for la := 1; la <= 14; la++ {
 				if fn := s.pod.pins[la].fn; fn != "none" && fn != "gpio" {
-					return nil, errf("la voltage change refused: LA%d is in use by %s; %s", la, s.pinOwnerText(la), s.releaseHint(la))
+					used = append(used, fmt.Sprintf("LA%d (%s)", la, fn))
 				}
 			}
+			if len(used) > 0 {
+				return nil, coded(codeLaVoltagePinsInUse, "pins", strings.Join(used, ", "))
+			}
 		}
+		// The pulls go to the bank rail (la_pull_1v8): engaged ones stay on when it switches.
 		s.pod.laMV = mv
-		if mv == 1800 {
-			s.pod.pulls = 0 // the resistors are 3V3-referenced: the pod drops them at 1.8 V
-		}
 		s.advance(s.now())
 		s.touchBase(s.now())
 	}
@@ -195,11 +199,17 @@ func (s *Sim) cmdLaVoltage(r request) (any, error) {
 }
 
 func (s *Sim) cmdTargetPower(r request) (any, error) {
+	if !r.has("efuse") {
+		return nil, fwError("missing efuse")
+	}
+	on, isBool := r["enabled"].(bool)
+	if !isBool {
+		return nil, fwError("enabled must be true or false")
+	}
 	n := r.int("efuse", 0)
 	if n != 1 && n != 2 {
-		return nil, fwError("efuse must be 1 or 2")
+		return nil, fwError("invalid efuse")
 	}
-	on := r.flag("state")
 	delay := r.int("delay_ms", 0)
 	if delay < 0 || delay > 600000 {
 		return nil, fwError("delay_ms out of range")
@@ -230,7 +240,7 @@ func (s *Sim) cmdTargetPower(r request) (any, error) {
 	} else {
 		s.applyPower(now, n, on)
 	}
-	return map[string]any{"efuse": n, "enabled": b2i(on), "delay_ms": delay}, nil
+	return map[string]any{"efuse": n, "enabled": on, "delay_ms": delay}, nil
 }
 
 func (s *Sim) cmdTargetStatus(request) (any, error) {
@@ -238,7 +248,8 @@ func (s *Sim) cmdTargetStatus(request) (any, error) {
 	defer s.mu.Unlock()
 	s.advance(s.now())
 	rail := func(e efuseState) map[string]any {
-		return map[string]any{"enabled": b2i(e.enabled), "fault": b2i(e.fault), "valid": b2i(e.enabled)}
+		return map[string]any{"enabled": e.enabled, "fault": e.fault, "valid": e.enabled, "flt_pin": b2i(e.fault),
+			"reverse_blocks": 0, "profile": nil}
 	}
 	return map[string]any{"efuse1": rail(s.pod.efuse[1]), "efuse2": rail(s.pod.efuse[2]), "status_supported": true}, nil
 }

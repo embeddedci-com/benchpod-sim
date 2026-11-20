@@ -696,7 +696,7 @@ func (s *Sim) sensorClaimCheck(kind string, pins map[string]int) error {
 				}
 			}
 			if !shared {
-				return errf("pin conflict: LA%d is in use by %s; %s", la, s.pinOwnerText(la), s.releaseHint(la))
+				return s.pinInUse(la)
 			}
 		}
 		if pullDown(la) && s.pod.pulls&(1<<(la-1)) != 0 {

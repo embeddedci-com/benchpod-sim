@@ -123,7 +123,7 @@ func TestSensorStartChecks(t *testing.T) {
 		t.Fatalf("shared line owner: %v", o)
 	}
 	msg := refused(t, addr, map[string]any{"cmd": "sensor_start", "instance": "temp", "pins": map[string]any{"sda": 2, "scl": 3}})
-	if msg != `pin conflict: LA2 is in use by sensor:env (i2c_sda); stop the sensor emulation first ({"cmd":"sensor_stop","instance":"env"})` {
+	if msg != "BP0031 function=i2c_sda instance=env la=2 owner=sensor:env (i2c_sda)" {
 		t.Fatalf("conflict: %q", msg)
 	}
 	if msg := refused(t, addr, map[string]any{"cmd": "gpio", "la": 1, "mode": "output"}); !strings.Contains(msg, "sensor:env (i2c_scl)") {

@@ -30,7 +30,7 @@ func TestFirmwareRebootThenDUTBootsAgain(t *testing.T) {
 		if _, err := br.ReadString('\n'); err != nil {
 			t.Fatal(err)
 		}
-		exec(map[string]any{"cmd": "target_power", "efuse": float64(1), "state": float64(1)})
+		exec(map[string]any{"cmd": "target_power", "efuse": float64(1), "enabled": true})
 		seen := ""
 		_ = here.SetReadDeadline(time.Now().Add(8 * time.Second))
 		for !strings.Contains(seen, "APP_OK") {
@@ -134,9 +134,49 @@ func TestRenamedFields(t *testing.T) {
 	}
 	ok(t, addr, map[string]any{"cmd": "can_start", "bitrate": 500000})
 	ok(t, addr, map[string]any{"cmd": "can_stop"})
-	for _, old := range []string{"can_config", "can_disable"} {
+	for _, old := range []string{"can_config", "can_disable", "la"} {
 		if msg := refused(t, addr, map[string]any{"cmd": old}); msg != "BP0002 cmd="+old {
 			t.Fatalf("%s: %s", old, msg)
 		}
+	}
+}
+
+// la_pull and la_step replace la; target_power, target_status and la_pull use booleans.
+func TestLaPullAndBooleans(t *testing.T) {
+	_, addr := startSim(t, WithFirmware("4.0.0", Hooks{}))
+	if msg := refused(t, addr, map[string]any{"cmd": "la_pull"}); msg != "BP0001" {
+		t.Fatal(msg)
+	}
+	ok(t, addr, map[string]any{"cmd": "la_voltage", "mv": 1800})
+	p := ok(t, addr, map[string]any{"cmd": "la_pull", "la": 3, "pull": "up"}).(map[string]any)
+	if p["state"] != "up" || p["pullups_available"] != true || p["pullup"] != nil || p["ohms"] != nil || p["pull"] != nil ||
+		len(p["dirs"].([]any)) != 1 {
+		t.Fatalf("la_pull set: %v", p)
+	}
+	if m := ok(t, addr, map[string]any{"cmd": "la_pull"}).(map[string]any); m["la_pullup_mask"] != 4.0 || m["pullups_available"] != true {
+		t.Fatalf("la_pull mask: %v", m)
+	}
+	if msg := refused(t, addr, map[string]any{"cmd": "la_pull", "la": 7, "pull": "up"}); msg != "BP0024 have=down la=7 want=up" {
+		t.Fatal(msg)
+	}
+	if msg := refused(t, addr, map[string]any{"cmd": "la_pull", "la": 9, "pull": "up"}); msg != "BP0023 la=9" {
+		t.Fatal(msg)
+	}
+	if q := ok(t, addr, map[string]any{"cmd": "la_pull", "la": 3, "pullup": "off"}).(map[string]any); q["state"] != "up" {
+		t.Fatalf("pullup is not read any more: %v", q)
+	}
+	if msg := refused(t, addr, map[string]any{"cmd": "la_step", "la": 5}); msg != "missing steps" {
+		t.Fatal(msg)
+	}
+	if msg := refused(t, addr, map[string]any{"cmd": "target_power", "efuse": 1, "state": 1}); msg != "enabled must be true or false" {
+		t.Fatal(msg)
+	}
+	tp := ok(t, addr, map[string]any{"cmd": "target_power", "efuse": 1, "enabled": true}).(map[string]any)
+	if tp["enabled"] != true {
+		t.Fatalf("target_power: %v", tp)
+	}
+	e1 := ok(t, addr, map[string]any{"cmd": "target_status"}).(map[string]any)["efuse1"].(map[string]any)
+	if e1["enabled"] != true || e1["fault"] != false || e1["valid"] != true || e1["flt_pin"] != 0.0 {
+		t.Fatalf("target_status: %v", e1)
 	}
 }

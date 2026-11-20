@@ -176,6 +176,7 @@ const (
 	codeClientTooOld         = 30
 	codeLaPinInUse           = 31
 	codeLaPullDownEngaged    = 32
+	codeLaVoltagePinsInUse   = 37
 	codeLaPullDownConflict   = 33
 	codeLanLocked            = 40
 	codePolicyNotFromLan     = 41
@@ -285,7 +286,8 @@ var simpleHandlers = map[string]func(s *Sim, r request) (any, error){
 	"power_status":          (*Sim).cmdPowerStatus,
 	"nrst":                  (*Sim).cmdNrst,
 	"usb_cc":                (*Sim).cmdUsbCc,
-	"la":                    (*Sim).cmdLa,
+	"la_step":               (*Sim).cmdLaStep,
+	"la_pull":               (*Sim).cmdLaPull,
 	"la_pins":               (*Sim).cmdLaPins,
 	"gpio":                  (*Sim).cmdGpio,
 	"sensor_define":         (*Sim).cmdSensorDefine,

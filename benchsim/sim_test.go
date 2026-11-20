@@ -178,7 +178,7 @@ func TestStatusAndLaVoltage(t *testing.T) {
 	if ok(t, addr, map[string]any{"cmd": "ping"}) != "pong" {
 		t.Fatal("ping")
 	}
-	if msg := refused(t, addr, map[string]any{"cmd": "la_capture", "samples": 64}); !strings.HasPrefix(msg, "la voltage not set") {
+	if msg := refused(t, addr, map[string]any{"cmd": "la_capture", "samples": 64}); msg != "BP0001" {
 		t.Fatalf("la_capture before la_voltage: %s", msg)
 	}
 	if msg := refused(t, addr, map[string]any{"cmd": "la_voltage", "mv": 2500}); !strings.Contains(msg, "1800 or 3300") {
@@ -209,7 +209,7 @@ func TestBootLogAndConsole(t *testing.T) {
 	_, addr := startSim(t, WithLaVoltage(3300))
 	k := openConsole(t, addr)
 	start := time.Now()
-	ok(t, addr, map[string]any{"cmd": "target_power", "efuse": 1, "state": 1})
+	ok(t, addr, map[string]any{"cmd": "target_power", "efuse": 1, "enabled": true})
 	boot := k.expect(`APP_OK\r\n`, 4*time.Second)
 	if d := time.Since(start); d < 900*time.Millisecond || d > 2*time.Second {
 		t.Errorf("APP_OK after %v, want about 1 s", d)
@@ -248,7 +248,7 @@ func TestBootLogAndConsole(t *testing.T) {
 	k.expect(`APP_OK`, 2*time.Second)
 
 	// The console holds LA3/LA4: a GPIO claim on them is the firmware's pin conflict.
-	if msg := refused(t, addr, map[string]any{"cmd": "gpio", "la": 3, "mode": "output"}); !strings.HasPrefix(msg, "pin conflict: LA3 is in use by uart_rx") {
+	if msg := refused(t, addr, map[string]any{"cmd": "gpio", "la": 3, "mode": "output"}); msg != "BP0031 function=uart_rx instance= la=3 owner=uart_rx" {
 		t.Fatal(msg)
 	}
 }
@@ -328,7 +328,7 @@ func decodeUART(edges [][2]int, n, ch int, rate, baud float64) string {
 func TestLaCaptureShowsTheBootLog(t *testing.T) {
 	t.Parallel()
 	_, addr := startSim(t, WithLaVoltage(3300))
-	ok(t, addr, map[string]any{"cmd": "target_power", "efuse": 1, "state": 1, "delay_ms": 300})
+	ok(t, addr, map[string]any{"cmd": "target_power", "efuse": 1, "enabled": true, "delay_ms": 300})
 	fs := frames(t, addr, map[string]any{"cmd": "la_capture", "samples": 60000, "sample_rate_hz": 2e6,
 		"trigger": map[string]any{"la": 3, "edge": "falling"}, "trigger_timeout_ms": 5000})
 	var edges [][2]int
@@ -372,7 +372,7 @@ func TestPowerProfileAndAdcCapture(t *testing.T) {
 	if r := stats["sample_rate_hz"].(float64); r < 360 || r > 370 {
 		t.Fatalf("rate %v", r)
 	}
-	ok(t, addr, map[string]any{"cmd": "target_power", "efuse": 1, "state": 0})
+	ok(t, addr, map[string]any{"cmd": "target_power", "efuse": 1, "enabled": false})
 	fs = frames(t, addr, map[string]any{"cmd": "power_profile", "efuse": 1, "sample_rate_hz": 200, "keep_samples": 0, "duration_ms": 200})
 	if avg := fs[len(fs)-1]["stats"].(map[string]any)["avg_ua"].(float64); avg != 0 {
 		t.Fatalf("rail off draws %v uA", avg)
