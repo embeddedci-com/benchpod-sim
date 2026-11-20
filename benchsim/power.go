@@ -26,19 +26,19 @@ func achievedRate(req float64) float64 {
 
 func (s *Sim) cmdPowerProfile(c *conn, r request) error {
 	fail := func(err error) error {
-		_ = c.send(errReply(err.Error()))
+		_ = c.send(errorReply(err))
 		return err
 	}
 	action := r.str("action")
 	efuse := r.int("efuse", 1)
-	rate := float64(r.int("rate_hz", 500))
+	rate := float64(r.int("sample_rate_hz", 500))
 	keep := r.int("keep_samples", 0)
 	if action == "" || action == "start" {
 		if efuse != 1 && efuse != 2 {
 			return fail(fwError("efuse must be 1 or 2"))
 		}
-		if rate < 100 || rate > 1000 {
-			return fail(fwError("rate_hz must be 100..1000"))
+		if rate < 100 || rate > 500 {
+			return fail(fwError("sample_rate_hz must be 100..500"))
 		}
 		if keep < 0 || keep > 4096 {
 			return fail(fwError("keep_samples must be 0..4096"))
@@ -70,7 +70,7 @@ func (s *Sim) cmdPowerProfile(c *conn, r request) error {
 		s.pod.profile = &powerSession{efuse: efuse, rateHz: rate, keep: keep, start: now,
 			maxEnd: now + int64(max(1, min(maxMs, 600000)))*msNs}
 		s.mu.Unlock()
-		return c.send(okReply(map[string]any{"started": true, "efuse": efuse, "rate_hz": int(rate)}))
+		return c.send(okReply(map[string]any{"started": true, "efuse": efuse, "sample_rate_hz": int(rate)}))
 	case "status":
 		s.mu.Lock()
 		p := s.pod.profile
@@ -169,7 +169,7 @@ func (s *Sim) profileFrames(p powerSession, end int64, truncated bool) []map[str
 		return sum / float64(n)
 	}
 	stats := map[string]any{
-		"efuse": p.efuse, "rate_hz": math.Round(rate*10) / 10, "adc_rate_hz": p.rateHz, "n": n,
+		"efuse": p.efuse, "sample_rate_hz": math.Round(rate*10) / 10, "adc_sample_rate_hz": p.rateHz, "n": n,
 		"duration_ms": (end - p.start) / msNs,
 		"avg_ua":      math.Round(avg(sumUA)), "min_ua": minUA, "peak_ua": peakUA,
 		"avg_mv": math.Round(avg(sumMV)), "min_mv": minMV, "max_mv": maxMV,

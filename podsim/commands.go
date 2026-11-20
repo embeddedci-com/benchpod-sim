@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/embeddedci-com/benchpod-sim/benchsim"
 )
 
 // CmdLogEntry is one command the pod saw, for tests to assert on.
@@ -91,8 +93,8 @@ func (p *Pod) onCommandRequest(gen int, data []byte) {
 	p.mu.Lock()
 	if p.st.busy {
 		p.mu.Unlock()
-		p.logCmd("cloud", req.Command, "error", "device busy")
-		p.respondError(gen, req.RequestID, "device busy")
+		p.logCmd("cloud", req.Command, "error", "BP0052")
+		p.respondCoded(gen, req.RequestID, benchsim.Reply{Error: "BP0052", Code: "BP0052"})
 		return
 	}
 	p.st.busy = true
@@ -107,7 +109,8 @@ func (p *Pod) onCommandRequest(gen int, data []byte) {
 		if delay > 0 {
 			time.Sleep(delay)
 		}
-		res, errMsg := p.execute(req.Command)
+		res, rep := p.execute(req.Command)
+		errMsg := rep.Error
 		status := "ok"
 		if errMsg != "" {
 			status = "error"
@@ -124,7 +127,7 @@ func (p *Pod) onCommandRequest(gen int, data []byte) {
 			return
 		}
 		if errMsg != "" {
-			p.respondError(gen, req.RequestID, errMsg)
+			p.respondCoded(gen, req.RequestID, rep)
 			return
 		}
 		_ = p.send(gen, map[string]any{
@@ -135,10 +138,23 @@ func (p *Pod) onCommandRequest(gen int, data []byte) {
 }
 
 func (p *Pod) respondError(gen int, requestID, msg string) {
-	_ = p.send(gen, map[string]any{
+	p.respondCoded(gen, requestID, benchsim.Reply{Error: msg})
+}
+
+// respondCoded is an error command.response: "error" is the message, or the code when there is
+// none, with "code" and "args" beside it for a coded refusal.
+func (p *Pod) respondCoded(gen int, requestID string, r benchsim.Reply) {
+	m := map[string]any{
 		"type": "command.response", "request_id": requestID, "device_id": p.DeviceID(),
-		"status": "error", "error": msg,
-	})
+		"status": "error", "error": r.Error,
+	}
+	if r.Code != "" {
+		m["code"] = r.Code
+		if len(r.Args) > 0 {
+			m["args"] = r.Args
+		}
+	}
+	_ = p.send(gen, m)
 }
 
 // RunLAN runs a command as a LAN client would (the pod's own command port): the lease gate
@@ -190,7 +206,7 @@ func (p *Pod) onLeaseState(data []byte) {
 }
 
 // execute runs one command from the cloud channel: the Sim is the firmware's command layer.
-func (p *Pod) execute(cmd map[string]any) (any, string) {
+func (p *Pod) execute(cmd map[string]any) (any, benchsim.Reply) {
 	if name, _ := cmd["cmd"].(string); name == "lease_state" {
 		p.mu.Lock()
 		defer p.mu.Unlock()
@@ -200,13 +216,13 @@ func (p *Pod) execute(cmd map[string]any) (any, string) {
 			out["holder"] = holder
 			out["expires_in_s"] = int(time.Until(p.st.lease.Deadline).Seconds())
 		}
-		return out, ""
+		return out, benchsim.Reply{}
 	}
-	data, msg := p.sim.Exec(cmd, true)
-	if msg != "" {
-		return nil, msg
+	r := p.sim.ExecReply(cmd, true)
+	if r.Error != "" {
+		return nil, r
 	}
-	return data, ""
+	return r.Data, benchsim.Reply{}
 }
 
 // hostCommand answers the verbs this side owns; the Sim calls it after its gates.

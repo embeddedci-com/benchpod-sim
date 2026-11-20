@@ -126,7 +126,7 @@ func New(opts ...Option) *Sim {
 		done:      make(chan struct{}),
 	}
 	s.pod.init()
-	s.flash = podFlash{lanPolicy: "open", sigPolicy: "audit"}
+	s.flash = podFlash{lanPolicy: "open", sigPolicy: "required", usbNet: true}
 	s.cmdConn = &conn{}
 	s.dut.init()
 	for _, o := range opts {

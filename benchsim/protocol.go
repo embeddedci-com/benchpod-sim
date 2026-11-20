@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -108,6 +109,130 @@ func errReply(msg string) map[string]any {
 	return map[string]any{"status": "error", "message": msg}
 }
 
+// errorReply is the reply line for a refusal: a coded one as {"status":"error","code":...,
+// "args":{...}} (no message, firmware 4.0.0), any other as {"status":"error","message":...}.
+func errorReply(err error) map[string]any {
+	var ce *codedError
+	if errors.As(err, &ce) {
+		return ce.reply()
+	}
+	return errReply(err.Error())
+}
+
+// codedError is a refusal with a stable error code (bp_errors.c): the client renders the
+// catalog's message from the code and its args.
+type codedError struct {
+	code int
+	args map[string]any
+}
+
+// coded builds a codedError from key, value pairs.
+func coded(code int, kv ...any) error {
+	e := &codedError{code: code}
+	if len(kv) > 0 {
+		e.args = map[string]any{}
+		for i := 0; i+1 < len(kv); i += 2 {
+			e.args[kv[i].(string)] = kv[i+1]
+		}
+	}
+	return e
+}
+
+// Code is the code as the pod writes it, "BP0031".
+func (e *codedError) Code() string { return fmt.Sprintf("BP%04d", e.code) }
+
+// Error is the firmware's short form, "BP0031 la=4 owner=gpio" (bp_err_render), keys sorted.
+func (e *codedError) Error() string {
+	keys := make([]string, 0, len(e.args))
+	for k := range e.args {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	b.WriteString(e.Code())
+	for _, k := range keys {
+		fmt.Fprintf(&b, " %s=%v", k, e.args[k])
+	}
+	return b.String()
+}
+
+func (e *codedError) reply() map[string]any {
+	m := map[string]any{"status": "error", "code": e.Code()}
+	if len(e.args) > 0 {
+		m["args"] = e.args
+	}
+	if e.code == codeClientTooOld { // the one coded refusal that keeps a message, for old clients
+		m["message"] = fmt.Sprintf("Update the BenchPod SDK, MCP or CLI: this firmware needs client API %v or newer (this client sent %v)",
+			e.args["min_client_api"], e.args["client_api"])
+	}
+	return m
+}
+
+// The error codes the simulator sends (errors/catalog.toml).
+const (
+	codeLaVoltageNotSet      = 1
+	codeUnknownCommand       = 2
+	codeLeaseBusy            = 25
+	codeClientTooOld         = 30
+	codeLaPinInUse           = 31
+	codeLaPullDownEngaged    = 32
+	codeLaVoltagePinsInUse   = 37
+	codeLaPullDownConflict   = 33
+	codeLanLocked            = 40
+	codePolicyNotFromLan     = 41
+	codeSettingCloudOrUsb    = 42
+	codeSettingDeviceOnly    = 43
+	codeRoleRequired         = 45
+	codePodBusy              = 47
+	codeStorageBusBusy       = 48
+	codeSignaturesAlwaysReqd = 74
+	codeTriggerTimeout       = 38
+	codeSamplesOutOfRange    = 67
+	codePsramTooSmall        = 72
+	codeLaNoPull             = 23
+	codeLaPullDirection      = 24
+)
+
+// The client API level (features.toml): what this firmware speaks and the lowest it takes.
+const (
+	apiLevel     = 2
+	minClientAPI = 2
+	featuresRev  = 11
+)
+
+// anyClient are the verbs every client may send whatever its client_api (CMD_F_ANY_CLIENT), so
+// an old client can still read the pod, let go of it and update it.
+var anyClient = map[string]bool{
+	"status": true, "diag": true, "ping": true, "lease_release": true, "ota_status": true,
+	"ota_begin": true, "ota_data": true, "ota_end": true, "ota_commit": true, "ota_abort": true,
+	"ota_selftest": true, "blob_status": true, "identity_public": true,
+}
+
+// clientAPIGate is cmd_gate_client_api: a command whose top-level client_api (none = 0) is below
+// min_client_api is refused with BP0030, before every other gate.
+func clientAPIGate(cmd string, r request) error {
+	if anyClient[cmd] {
+		return nil
+	}
+	n := 0
+	switch v := r["client_api"].(type) {
+	case float64:
+		if v >= 0 && v == math.Trunc(v) {
+			n = int(min(v, math.MaxInt32))
+		}
+	case int:
+		n = max(v, 0)
+	case string:
+		if x, err := strconv.Atoi(v); err == nil && x >= 0 {
+			n = x
+		}
+	}
+	if n >= minClientAPI {
+		return nil
+	}
+	return coded(codeClientTooOld, "client_api", n, "min_client_api", minClientAPI, "api", apiLevel)
+}
+
 // conn is one client connection: one request, then its reply (or a stream, or raw UART).
 type conn struct {
 	net.Conn
@@ -161,7 +286,8 @@ var simpleHandlers = map[string]func(s *Sim, r request) (any, error){
 	"power_status":          (*Sim).cmdPowerStatus,
 	"nrst":                  (*Sim).cmdNrst,
 	"usb_cc":                (*Sim).cmdUsbCc,
-	"la":                    (*Sim).cmdLa,
+	"la_step":               (*Sim).cmdLaStep,
+	"la_pull":               (*Sim).cmdLaPull,
 	"la_pins":               (*Sim).cmdLaPins,
 	"gpio":                  (*Sim).cmdGpio,
 	"sensor_define":         (*Sim).cmdSensorDefine,
@@ -191,19 +317,24 @@ func (s *Sim) dispatch(c *conn, req request) {
 	if cmd == "" {
 		err := fwError("missing cmd")
 		s.logCmd(req, err)
-		_ = c.send(errReply(err.Error()))
+		_ = c.send(errorReply(err))
+		return
+	}
+	if err := clientAPIGate(cmd, req); err != nil {
+		s.logCmd(req, err)
+		_ = c.send(errorReply(err))
 		return
 	}
 	if err := s.analogGuard(cmd); err != nil {
 		s.logCmd(req, err)
-		_ = c.send(errReply(err.Error()))
+		_ = c.send(errorReply(err))
 		return
 	}
 	if h, ok := simpleHandlers[cmd]; ok {
 		data, err := h(s, req)
 		s.logCmd(req, err)
 		if err != nil {
-			_ = c.send(errReply(err.Error()))
+			_ = c.send(errorReply(err))
 			return
 		}
 		_ = c.send(okReply(data))
@@ -226,10 +357,10 @@ func (s *Sim) dispatch(c *conn, req request) {
 	default:
 		err = notInDemo(cmd)
 		if !knownPodCommands[cmd] {
-			err = errf("unknown command: %s", cmd)
+			err = coded(codeUnknownCommand, "cmd", cmd)
 		}
 		s.logCmd(req, err)
-		_ = c.send(errReply(err.Error()))
+		_ = c.send(errorReply(err))
 		return
 	}
 	// The stream handlers sent their own replies (or an error before the first one).
@@ -242,10 +373,10 @@ var knownPodCommands = map[string]bool{
 	"dap_start": true, "load_bin": true, "replay": true, "ota_begin": true, "ota_data": true,
 	"ota_end": true, "fpga_image": true, "dac_control_loop": true, "dac_loop_input": true,
 	"dac_loop_probe": true, "dac_limits": true, "current_out": true, "calibrate": true,
-	"calibration": true, "can_config": true, "can_write": true, "can_read": true,
-	"can_status": true, "can_term": true, "can_respond": true, "can_disable": true,
+	"calibration": true, "can_start": true, "can_write": true, "can_read": true,
+	"can_status": true, "can_term": true, "can_respond": true, "can_stop": true,
 	"spi_start": true,
-	"spi_stop":  true, "spi_xfer": true, "spi_stream": true, "spi_flash": true, "usb_net": true,
-	"lan_tls": true, "sig_policy": true, "lan_policy": true, "wifi": true, "dac_set": true,
+	"spi_stop":  true, "spi_xfer": true, "spi_stream": true, "spi_flash": true, "usb_network": true,
+	"lan_tls": true, "sig_policy": true, "lan_policy": true, "wifi_status": true, "dac_set": true,
 	"measure": true, "psram_recover": true, "cloud_config": true, "flash_self": true,
 }

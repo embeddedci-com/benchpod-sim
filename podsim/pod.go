@@ -106,7 +106,7 @@ type lease struct {
 // New makes a pod with a fresh identity.
 func New(cfg Config) (*Pod, error) {
 	if cfg.Firmware == "" {
-		cfg.Firmware = "3.8.0"
+		cfg.Firmware = "4.0.0"
 	}
 	if cfg.Board == "" {
 		cfg.Board = "stm32h563"

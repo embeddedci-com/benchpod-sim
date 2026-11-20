@@ -81,7 +81,7 @@ func TestMCPEndToEnd(t *testing.T) {
 
 	// Connect as the host does, then the agent's first steps.
 	expect(call("connect", nil), `"connected":\s*true`)
-	call("set_la_voltage", map[string]any{"voltage": 3.3})
+	call("set_la_voltage", map[string]any{"la_voltage": 3.3})
 	expect(call("status", nil), `"la_voltage":\s*3\.3`)
 	w := call("wiring", nil)
 	expect(w, `"uart_rx":\s*3`)
@@ -100,7 +100,7 @@ func TestMCPEndToEnd(t *testing.T) {
 	expect(call("sensor_status", nil), `"instances":\s*\[\]`)
 	expect(call("sensor_library", nil), `"bmp280"`)
 	expect(call("sensor_show", map[string]any{"name": "bmp280"}), `temperature_c`)
-	call("set_pull", map[string]any{"las": []any{1, 2}, "enabled": true})
+	call("set_pull", map[string]any{"la": []any{1, 2}, "pull": "up"})
 	call("pull_status", nil)
 	call("sensor_start", map[string]any{"definition": "bme280", "instance": "env"})
 	expect(call("power_cycle_and_capture", map[string]any{"until_regex": "APP_OK"}), `chip id 0x60, not 0x58`)
@@ -113,13 +113,13 @@ func TestMCPEndToEnd(t *testing.T) {
 	// Story 3: the console: readings, then an over-temperature alarm from the emulated sensor.
 	call("uart_open", nil)
 	call("uart_write", map[string]any{"text": "alarm"})
-	expect(call("uart_read", map[string]any{"until_regex": `ALARM .*press_pa=\d+ events=\d+`, "timeout": 3}), `env=ok env_c=24\.0`)
+	expect(call("uart_read", map[string]any{"until_regex": `ALARM .*press_pa=\d+ events=\d+`, "timeout_s": 3}), `env=ok env_c=24\.0`)
 	call("sensor_set", map[string]any{"instance": "env", "values": map[string]any{"temperature_c": 55}})
-	expect(call("uart_read", map[string]any{"until_regex": "EVT alarm set=overtemp", "timeout": 3}), `"matched":\s*true`)
+	expect(call("uart_read", map[string]any{"until_regex": "EVT alarm set=overtemp", "timeout_s": 3}), `"matched":\s*true`)
 	expect(call("gpio_read", map[string]any{"la": []any{"ALARM"}}), `"level":\s*1`)
 	call("la_pins", nil)
 	call("sensor_set", map[string]any{"instance": "env", "values": map[string]any{"temperature_c": 30}})
-	expect(call("uart_read", map[string]any{"until_regex": "EVT alarm clear=overtemp", "timeout": 3}), `"matched":\s*true`)
+	expect(call("uart_read", map[string]any{"until_regex": "EVT alarm clear=overtemp", "timeout_s": 3}), `"matched":\s*true`)
 
 	// Story 4: "set the room temperature to 30 degC and see if the thermostat turns the heater
 	// on": PA1 is the process sensor (0.5 V + 20 mV/degC) driven by the pod's 3.3 V DAC, PA4 the
@@ -127,12 +127,12 @@ func TestMCPEndToEnd(t *testing.T) {
 	call("dac_output", map[string]any{"path": "3v3", "volts": 0.5 + 0.02*30})
 	time.Sleep(100 * time.Millisecond) // the node samples PA1 every 10 ms
 	call("uart_write", map[string]any{"text": "ctl on 40"})
-	expect(call("uart_read", map[string]any{"until_regex": `CTL mode=on[^\r]*\r\n`, "timeout": 3}), `pv_c=30\.0`)
+	expect(call("uart_read", map[string]any{"until_regex": `CTL mode=on[^\r]*\r\n`, "timeout_s": 3}), `pv_c=30\.0`)
 	time.Sleep(3 * time.Second)
 	expect(call("adc_read", map[string]any{"source": "ext"}), `"voltage":\s*[1-3]\.`)
 	expect(call("capture_adc", map[string]any{"samples": 4096, "source": "ext"}), `"mean":\s*[1-3]\.`)
 	call("uart_write", map[string]any{"text": "ctl off"})
-	call("uart_read", map[string]any{"until_regex": "CTL mode=off", "timeout": 3})
+	call("uart_read", map[string]any{"until_regex": "CTL mode=off", "timeout_s": 3})
 	call("uart_close", nil)
 
 	// Story 5: "capture the I2C bus".
@@ -145,17 +145,17 @@ func TestMCPEndToEnd(t *testing.T) {
 
 	// The boot log on the logic analyzer: power on 0.5 s out, trigger on the first start bit.
 	call("power_off", nil)
-	call("power_on", map[string]any{"delay": 0.5})
+	call("power_on", map[string]any{"delay_s": 0.5})
 	call("capture_la", map[string]any{"samples": 100000, "sample_rate_hz": 2e6, "trigger_la": "uart_rx", "trigger_edge": "falling"})
 	expect(call("decode_la", map[string]any{"protocol": "uart", "rx": 3, "baud": 115200}), `PROCESS-NODE`)
 
 	// Story 6: "measure the board's current".
 	time.Sleep(time.Second)
-	expect(call("measure_power", map[string]any{"duration": 1.0, "points": 20}), `"avg_current":\s*0\.04`)
+	expect(call("measure_power", map[string]any{"duration_s": 1.0, "points": 20}), `"avg_current":\s*0\.04`)
 
 	// The rest of the allow-list.
 	call("reset_target", nil)
-	expect(call("capture_uart", map[string]any{"duration": 2.0, "until_regex": "APP_OK"}), `reset=pin`)
+	expect(call("capture_uart", map[string]any{"duration_s": 2.0, "until_regex": "APP_OK"}), `reset=pin`)
 	call("generate", map[string]any{"waveform": "sine", "freq_hz": 50, "amplitude": 0.5, "offset": 1.5})
 	call("dac_stop", nil)
 	expect(call("sensor_stop", nil), `"env"`)

@@ -116,7 +116,7 @@ func (s *Sim) dacLimitsCheck(cmd string, r request) string {
 	case "dac_out":
 		path := r.str("path")
 		why := route(path)
-		v, ok := r.num("volts")
+		v, ok := r.num("v")
 		if why == "" && ok && pathIndex(path) == l.path {
 			if v < float64(l.minMv)/1000-0.005 || v > float64(l.maxMv)/1000+0.005 {
 				return fmt.Sprintf("refused: %s; %d mV is outside them", l.describe(), int(math.Round(v*1000)))
@@ -226,37 +226,35 @@ func (s *Sim) cmdDacSet(r request) (any, error) {
 	return nil, nil
 }
 
-// cmdGenerateFw is handle_generate: the 8-bit levels form (no routing) and the calibrated 16-bit
-// form (volts on a path, or microamps on the 4-20 mA output).
+// errGenerateLevels is generate without a calibrated level: firmware 4.0.0 takes no 8-bit
+// amplitude/offset.
+const errGenerateLevels = fwError("amplitude_v (with path and offset_v) or amplitude_ua (with offset_ua) is required")
+
+// cmdGenerateFw is handle_generate: volts on a path, or microamps on the 4-20 mA output, built at
+// the DAC's 16 bits. The reply is null, or {"cotrig":bool} with on_capture.
 func (s *Sim) cmdGenerateFw(_ *conn, r request) (any, error) {
 	wave := r.str("waveform")
 	freq := 1000.0
-	if v, ok := r.num("freq"); ok {
+	if v, ok := r.num("freq_hz"); ok {
 		freq = v
 	}
 	durMs := r.int("duration_ms", 0)
-	sixteen := r.has("amplitude_v") || r.has("amplitude_ua")
 	if wave != "sine" && wave != "square" && wave != "sawtooth" {
 		return nil, fwError("unknown waveform")
 	}
-	if freq <= 0 {
-		return nil, fwError("generate failed")
+	if !r.has("amplitude_v") && !r.has("amplitude_ua") {
+		return nil, errGenerateLevels
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
 	s.advance(now)
-	var amp, mid float64
-	path := ""
-	if sixteen {
-		var err error
-		amp, mid, path, err = s.generate16Codes(r)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		amp = float64(r.int("amplitude", 127)) * 256
-		mid = float64(r.int("offset", 128)) * 256
+	amp, mid, path, err := s.generate16Codes(r)
+	if err != nil {
+		return nil, err
+	}
+	if freq <= 0 {
+		return nil, fwError("generate failed")
 	}
 	s.snapshotAnalog(now)
 	a := &s.pod.analog
@@ -272,12 +270,7 @@ func (s *Sim) cmdGenerateFw(_ *conn, r request) (any, error) {
 	cotrigAsked := r.flag("on_capture")
 	nd.armed = cotrigAsked
 	a.dac = nd
-	switch {
-	case sixteen && cotrigAsked:
-		return map[string]any{"bits": 16, "cotrig": true}, nil
-	case sixteen:
-		return map[string]any{"bits": 16}, nil
-	case cotrigAsked:
+	if cotrigAsked {
 		return map[string]any{"cotrig": true}, nil
 	}
 	return nil, nil
@@ -333,7 +326,7 @@ func (s *Sim) generate16Codes(r request) (amp, mid float64, path string, err err
 // cmdLoadBin is handle_load_bin and load_bin_receive: raw bytes, then JSON again on the connection.
 func (s *Sim) cmdLoadBin(c *conn, r request) error {
 	fail := func(err error) error {
-		_ = c.send(errReply(err.Error()))
+		_ = c.send(errorReply(err))
 		return err
 	}
 	if !r.has("total") {
@@ -427,8 +420,8 @@ func (s *Sim) cmdReplay(c *conn, r request) (any, error) {
 	if s.pod.tracePsram && s.pod.image != 1 {
 		return nil, fwError("replay failed")
 	}
-	mhz, _ := r.num("sample_rate_mhz")
-	rate := replayRate(mhz*1e6, s.pod.tracePsram)
+	hz, _ := r.num("sample_rate_hz")
+	rate := replayRate(hz, s.pod.tracePsram)
 	s.snapshotAnalog(now)
 	d := &s.pod.analog.dac
 	cotrig := r.flag("on_capture")
@@ -678,7 +671,7 @@ func (s *Sim) cmdLoopInput(c *conn, r request) (any, error) {
 	now := s.now()
 	s.advance(now)
 	s.pod.loopSrc, s.pod.loopIn, s.pod.loopStep = src, in, step
-	return map[string]any{"source": src, "input": in, "step": step, "v": int(s.pod.analog.dac.codeAt(now))}, nil
+	return map[string]any{"source": src, "input": in, "step": step, "code16": int(s.pod.analog.dac.codeAt(now))}, nil
 }
 
 func (s *Sim) cmdLoopProbe(c *conn, _ request) (any, error) {
@@ -701,7 +694,7 @@ func (s *Sim) cmdLoopProbe(c *conn, _ request) (any, error) {
 	if d.loop != nil {
 		in, tripped = d.loop.in, d.loop.tripped
 	}
-	return map[string]any{"i": s.adcCount(now), "in": in, "source": s.pod.loopSrc, "v": int(math.Round(d.codeAt(now))), "tripped": tripped}, nil
+	return map[string]any{"i": s.adcCount(now), "in": in, "source": s.pod.loopSrc, "code16": int(math.Round(d.codeAt(now))), "tripped": tripped}, nil
 }
 
 func (s *Sim) cmdCurrentOut(r request) (any, error) {
@@ -1030,24 +1023,28 @@ func (s *Sim) cmdPsramPing(c *conn, r request) (any, error) {
 
 // The policies and cloud link settings (command_handler_policy.c, pod_policy.c).
 
-func (s *Sim) cmdSigPolicy(c *conn, r request) (any, error) {
+// cmdSigPolicy: firmware 4.0.0 installs only signed images. "set":"required" is fine from every
+// source; audit and permissive, and lan_unsigned true, are refused with BP0074. clear_floor is for
+// the USB link only, which the simulator has not.
+func (s *Sim) cmdSigPolicy(_ *conn, r request) (any, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if r.has("set") {
-		order := map[string]int{"audit": 0, "permissive": 1, "required": 2}
-		v, ok := order[r.str("set")]
-		if !ok {
-			return nil, fwError("sig_policy: set must be audit, permissive or required")
+		switch v := r.str("set"); v {
+		case "required":
+		case "audit", "permissive":
+			return nil, coded(codeSignaturesAlwaysReqd, "setting", "sig_policy", "want", v)
+		default:
+			return nil, fwError("sig_policy: set must be required")
 		}
-		if !c.cloud {
-			return nil, fwError("sig_policy: change it from the cloud or the USB console")
-		}
-		if v < order[s.flash.sigPolicy] {
-			return nil, errf("sig_policy: only the USB console can loosen the policy (now %s)", s.flash.sigPolicy)
-		}
-		s.flash.sigPolicy = r.str("set")
 	}
-	return map[string]any{"policy": s.flash.sigPolicy, "enforces": true, "keys": 1}, nil
+	if r.has("lan_unsigned") && r.str("lan_unsigned") != "false" {
+		return nil, coded(codeSignaturesAlwaysReqd, "setting", "lan_unsigned", "want", r.str("lan_unsigned"))
+	}
+	if r.flag("clear_floor") {
+		return nil, coded(codeSettingDeviceOnly, "setting", "rollback_floor")
+	}
+	return map[string]any{"policy": s.flash.sigPolicy, "enforces": true, "keys": 1, "rollback_floor": nil}, nil
 }
 
 func (s *Sim) cmdLanPolicy(c *conn, r request) (any, error) {
@@ -1059,7 +1056,7 @@ func (s *Sim) cmdLanPolicy(c *conn, r request) (any, error) {
 			return nil, fwError("lan_policy: set must be open, locked or off")
 		}
 		if !c.cloud {
-			return nil, fwError("lan_policy: change it from the cloud or the USB console")
+			return nil, coded(codePolicyNotFromLan, "setting", "lan_policy")
 		}
 		s.flash.lanPolicy = p
 	}
@@ -1068,12 +1065,57 @@ func (s *Sim) cmdLanPolicy(c *conn, r request) (any, error) {
 
 func (s *Sim) cloudLinkGate(c *conn, verb string) error {
 	if !c.cloud {
-		return errf("%s: change it from the cloud or over USB", verb)
+		return coded(codeSettingCloudOrUsb, "setting", verb)
 	}
 	if s.pod.capture || s.pod.heavy != nil || s.pod.load != nil {
-		return fwError("busy: a capture, upload or update is using the PSRAM bus; try again when it ends")
+		return coded(codeStorageBusBusy, "what", "a capture, upload or update is running")
 	}
 	return nil
+}
+
+// cmdUsbNetwork: whether the pod's USB port is also a network adapter. Only the device changes
+// it (the USB console, or a connection over the USB link, which the simulator has not): the LAN
+// and the cloud get BP0043.
+func (s *Sim) cmdUsbNetwork(_ *conn, r request) (any, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if r.has("enabled") {
+		if _, ok := r["enabled"].(bool); !ok {
+			return nil, fwError("usb_network: enabled must be true or false")
+		}
+		return nil, coded(codeSettingDeviceOnly, "setting", "usb_network")
+	}
+	return map[string]any{"enabled": s.flash.usbNet}, nil
+}
+
+// cmdLanTLS: the LAN API over TLS. HTTPS-only (default on) and SCPI (default off) change from the
+// cloud or over USB; the external LAN gets BP0042. The simulator serves plaintext only and keeps
+// answering JSON on it whatever https_only says.
+func (s *Sim) cmdLanTLS(c *conn, r request) (any, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, k := range []string{"https_only", "scpi"} {
+		if !r.has(k) {
+			continue
+		}
+		v, ok := r[k].(bool)
+		if !ok {
+			return nil, errf("lan_tls: %s must be true or false", k)
+		}
+		if !c.cloud {
+			return nil, coded(codeSettingCloudOrUsb, "setting", "lan_tls")
+		}
+		if k == "https_only" {
+			s.flash.httpsOff = !v
+		} else {
+			s.flash.scpi = v
+		}
+	}
+	if r.flag("regenerate") && !c.cloud {
+		return nil, coded(codeSettingCloudOrUsb, "setting", "lan_tls")
+	}
+	return map[string]any{"port": 8443, "https_only": !s.flash.httpsOff, "scpi": s.flash.scpi, "sessions": 0,
+		"error": "no certificate"}, nil
 }
 
 func (s *Sim) cmdCloudCa(c *conn, r request) (any, error) {

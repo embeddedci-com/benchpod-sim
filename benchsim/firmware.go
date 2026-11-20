@@ -63,7 +63,6 @@ func init() {
 		"capture":               {0, flagAnalog | flagStream | flagHeavy, nil, (*Sim).cmdCapture},
 		"capture_dual":          {0, flagStream | flagHeavy, nil, (*Sim).cmdCaptureDual},
 		"capture_read":          {0, flagStream | flagHeavy, nil, (*Sim).cmdCaptureRead},
-		"stream":                {0, flagAnalog | flagStream | flagHeavy, nil, (*Sim).cmdCapture},
 		"la_capture":            {0, flagStream | flagHeavy, nil, (*Sim).cmdLaCapture},
 		"sensor_la":             {0, flagStream | flagHeavy, nil, (*Sim).cmdSensorLa},
 		"can_read":              {0, flagNoHW | flagHeavy, simple((*Sim).cmdCanRead), nil},
@@ -74,11 +73,11 @@ func init() {
 		"eth":                   {0, flagNoHW | flagMixed, nil, nil},
 		"sig_policy":            {0, flagMixed, (*Sim).cmdSigPolicy, nil},
 		"lan_policy":            {0, flagMixed, (*Sim).cmdLanPolicy, nil},
-		"usb_network":           {0, flagMixed, nil, nil},
+		"usb_network":           {0, flagMixed, (*Sim).cmdUsbNetwork, nil},
 		"module":                {0, flagNoHW | flagMixed, nil, nil},
 		"cloud_ca":              {0, flagMixed, (*Sim).cmdCloudCa, nil},
 		"cloud_proxy":           {0, flagMixed, (*Sim).cmdCloudProxy, nil},
-		"lan_tls":               {0, flagMixed, nil, nil},
+		"lan_tls":               {0, flagMixed, (*Sim).cmdLanTLS, nil},
 		"generate":              {1, flagAnalog, (*Sim).cmdGenerateFw, nil},
 		"measure":               {1, flagAnalog | flagStream, nil, nil},
 		"load":                  {1, flagAnalog | flagStream, nil, nil},
@@ -95,7 +94,8 @@ func init() {
 		"adc_range":             {1, flagAnalog, simple((*Sim).cmdAdcRange), nil},
 		"dac_control_loop":      {1, flagAnalog, (*Sim).cmdControlLoop, nil},
 		"dac_loop_input":        {1, flagAnalog, (*Sim).cmdLoopInput, nil},
-		"la":                    {1, 0, simple((*Sim).cmdLa), nil},
+		"la_step":               {1, 0, simple((*Sim).cmdLaStep), nil},
+		"la_pull":               {1, 0, simple((*Sim).cmdLaPull), nil},
 		"gpio":                  {1, 0, simple((*Sim).cmdGpio), nil},
 		"la_voltage":            {1, flagNoHW, simple((*Sim).cmdLaVoltage), nil},
 		"nrst":                  {1, flagNoHW, simple((*Sim).cmdNrst), nil},
@@ -118,11 +118,11 @@ func init() {
 		"sensor_stimulus":       {1, 0, simple((*Sim).cmdSensorStimulus), nil},
 		"sensor_stimulus_start": {1, 0, simple((*Sim).cmdSensorStimulusStart), nil},
 		"sensor_stimulus_stop":  {1, 0, simple((*Sim).cmdSensorStimulusStop), nil},
-		"can_config":            {1, flagNoHW, simple((*Sim).cmdCanConfig), nil},
+		"can_start":             {1, flagNoHW, simple((*Sim).cmdCanStart), nil},
 		"can_write":             {1, flagNoHW, simple((*Sim).cmdCanWrite), nil},
 		"can_term":              {1, flagNoHW, simple((*Sim).cmdCanTerm), nil},
 		"can_respond":           {1, flagNoHW, simple((*Sim).cmdCanRespond), nil},
-		"can_disable":           {1, flagNoHW, simple((*Sim).cmdCanDisable), nil},
+		"can_stop":              {1, flagNoHW, simple((*Sim).cmdCanStop), nil},
 		"speedtest":             {1, flagNoHW | flagStream, nil, nil},
 		"fpga_image":            {1, 0, (*Sim).cmdFpgaImage, nil},
 		"psram_recover":         {1, 0, simple((*Sim).cmdPsramRecover), nil},
@@ -146,13 +146,17 @@ func mixedWrite(cmd string, r request) bool {
 	case "dac_limits":
 		return r.has("path") || (r.has("enabled") && r.str("enabled") == "false")
 	case "calibrate":
-		return r.has("source") || r.has("dac") || r.has("adc") || notFalse("clear")
-	case "sig_policy", "lan_policy", "usb_network":
+		return r.has("source") || r.has("dac") || r.has("adc") || r.has("comp_hf_dc_e4") || notFalse("clear")
+	case "sig_policy":
+		return r.has("set") || notFalse("clear_floor")
+	case "lan_policy":
 		return r.has("set")
+	case "usb_network":
+		return r.has("enabled")
 	case "cloud_ca", "cloud_proxy":
 		return r.has("set") || r.str("clear") == "true"
 	case "lan_tls":
-		return r.has("https_only") || r.str("regenerate") == "true"
+		return r.has("https_only") || r.has("scpi") || r.str("regenerate") == "true"
 	case "module":
 		return r.has("eeprom") && r.str("eeprom") != "read"
 	case "eth":
@@ -195,7 +199,12 @@ func (s *Sim) fwDispatch(c *conn, r request) {
 	}
 	fail := func(err error) {
 		note(err)
-		_ = c.send(errReply(err.Error()))
+		_ = c.send(errorReply(err))
+	}
+	// A client older than min_client_api is refused first, before every other gate.
+	if err := clientAPIGate(cmd, r); err != nil {
+		fail(err)
+		return
 	}
 	s.mu.Lock()
 	lanPolicy := s.flash.lanPolicy
@@ -203,7 +212,7 @@ func (s *Sim) fwDispatch(c *conn, r request) {
 	s.mu.Unlock()
 	if !c.cloud {
 		if tier >= 2 && lanPolicy != "open" {
-			fail(errf("locked: %s needs the cloud or USB", cmd))
+			fail(coded(codeLanLocked, "cmd", cmd))
 			return
 		}
 		light := known && row.flags&flagHeavy == 0 && tier == 0
@@ -211,12 +220,12 @@ func (s *Sim) fwDispatch(c *conn, r request) {
 			if holder == "" {
 				holder = "cloud"
 			}
-			fail(errf("busy: a cloud job holds this pod (%s, %d s left)", holder, left))
+			fail(coded(codeLeaseBusy, "holder", "a cloud job", "purpose", holder, "left_s", left))
 			return
 		}
 	}
 	if c.maxTier >= 0 && tier > c.maxTier {
-		fail(errf("forbidden: %s needs an organization owner or admin", cmd))
+		fail(coded(codeRoleRequired, "cmd", cmd))
 		return
 	}
 	if c.single && row.flags&flagStream != 0 {
@@ -247,14 +256,14 @@ func (s *Sim) fwDispatch(c *conn, r request) {
 	}
 	switch {
 	case !known:
-		fail(fwError("unknown cmd"))
+		fail(coded(codeUnknownCommand, "cmd", cmd))
 	case row.raw != nil:
 		note(row.raw(s, c, r))
 	case row.fn != nil:
 		data, err := row.fn(s, c, r)
 		note(err)
 		if err != nil {
-			_ = c.send(errReply(err.Error()))
+			_ = c.send(errorReply(err))
 			return
 		}
 		_ = c.send(okReply(data))
@@ -318,6 +327,11 @@ func (s *Sim) serveStream(c net.Conn, cloud bool, maxTier int) {
 			continue
 		}
 		if t := bytes.TrimLeft(line, " \t"); t[0] != '{' {
+			if !s.scpiOn() {
+				// SCPI is off (the 4.0.0 default): one line, then the connection closes.
+				_, _ = cn.Write([]byte("SCPI is off on this BenchPod: switch it on over USB or from the cloud (console: lan-tls scpi on)\n"))
+				return
+			}
 			s.scpiLine(cn, string(t))
 			continue
 		}
@@ -339,6 +353,12 @@ func (s *Sim) scpiLine(c *conn, line string) {
 	if strings.EqualFold(strings.TrimSpace(line), "*IDN?") {
 		_, _ = c.Write([]byte(fmt.Sprintf("EmbeddedCI,BenchPod,0,%s\r\n", s.firmwareVersion())))
 	}
+}
+
+func (s *Sim) scpiOn() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.flash.scpi
 }
 
 func (s *Sim) firmwareVersion() string {
@@ -370,8 +390,24 @@ func (b *bufConn) SetReadDeadline(time.Time) error  { return nil }
 func (b *bufConn) SetWriteDeadline(time.Time) error { return nil }
 
 // Exec runs one command as a single-reply caller: over the cloud command channel (cloud true,
-// streaming verbs refused) or as a LAN client. The data is the reply's data, or errMsg its refusal.
+// streaming verbs refused) or as a LAN client. The data is the reply's data, or errMsg its refusal:
+// the message, or the code ("BP0031") of a coded one, as the cloud envelope's "error" carries it.
 func (s *Sim) Exec(req map[string]any, cloud bool) (data json.RawMessage, errMsg string) {
+	r := s.ExecReply(req, cloud)
+	return r.Data, r.Error
+}
+
+// Reply is one command's single reply: Data when it ran, else Error (the message, or the code
+// when there is none) with Code and Args for a coded refusal.
+type Reply struct {
+	Data  json.RawMessage
+	Error string
+	Code  string
+	Args  map[string]any
+}
+
+// ExecReply is Exec with the refusal's code and args, for the cloud envelope.
+func (s *Sim) ExecReply(req map[string]any, cloud bool) Reply {
 	s.mu.Lock()
 	cn := s.cmdConn
 	s.mu.Unlock()
@@ -385,21 +421,27 @@ func (s *Sim) Exec(req map[string]any, cloud bool) (data json.RawMessage, errMsg
 	var r struct {
 		Status  string          `json:"status"`
 		Message string          `json:"message"`
+		Code    string          `json:"code"`
+		Args    map[string]any  `json:"args"`
 		Data    json.RawMessage `json:"data"`
 	}
 	if json.Unmarshal(line, &r) != nil {
-		return nil, "reply too large for the cloud channel"
+		return Reply{Error: "BP0054", Code: "BP0054", Args: map[string]any{"bytes": len(line), "limit": 1791}}
 	}
 	if r.Status == "error" {
-		return nil, r.Message
+		msg := r.Message
+		if msg == "" {
+			msg = r.Code
+		}
+		return Reply{Error: msg, Code: r.Code, Args: r.Args}
 	}
-	return r.Data, ""
+	return Reply{Data: r.Data}
 }
 
 // heavyBegin is heavy_begin: one owner of the capture hardware at a time. Callers hold s.mu.
 func (s *Sim) heavyBegin(c *conn) error {
 	if s.heavyInFlight() || (s.pod.heavy != nil && s.pod.heavy != c.heavyKey()) {
-		return fwError("busy")
+		return coded(codePodBusy)
 	}
 	s.pod.heavy = c.heavyKey()
 	return nil
@@ -442,19 +484,21 @@ func (s *Sim) fwStatus(c *conn, _ request) (any, error) {
 	out := map[string]any{
 		"device": "benchpod", "version": version, "board": podBoard, "net": "connected", "ip": "127.0.0.1",
 		"rssi_dbm": nil, "wifi": "off", "cloud": s.cloudState(),
-		"usb":        map[string]any{"net": "off", "setting": "on", "off_reason": "wifi", "link": false, "ip": "", "host_ip": "", "source": "3.0A", "source_ma": 3000},
+		"usb": map[string]any{"net": false, "enabled": s.flash.usbNet, "off_reason": "wifi", "link": false, "ip": "",
+			"host_ip": "", "source": "3.0A", "source_ma": 3000},
 		"rx_dropped": 0, "tx_dropped": 0, "adc_bits": 16, "adc_fullscale_mv": 4096, "adc_channels": 1,
 		"la_vccio_mv": s.pod.laMV, "board_rev": "v3", "board_rev_mv": 1650, "nrst_pin": true, "flash_kb": 2048,
-		"ota_sig": true, "sig_policy": s.flash.sigPolicy, "sig_keys": 1, "sig_policy_cmd": true,
-		"lan_policy": s.flash.lanPolicy, "lan_policy_cmd": true, "tunnel_max_tier": true, "lease_state": true,
-		"cloud_ca": true, "cloud_proxy": true,
-		"lan_tls":           map[string]any{"port": 8443, "https_only": false, "sha256": ""},
+		"sig_policy": s.flash.sigPolicy, "sig_keys": 1, "lan_policy": s.flash.lanPolicy,
+		"lan_tls":           map[string]any{"port": 8443, "https_only": !s.flash.httpsOff, "scpi": s.flash.scpi, "sha256": ""},
 		"lease":             map[string]any{"held": held, "holder": holder, "left_s": left},
+		"local_lease":       map[string]any{"held": false},
 		"gateware":          podGateware,
 		"gateware_embedded": podGateware, "loop_tripped": s.loopTripped(), "uart_rx_overflow": false,
 		"psram": "ok", "psram_ok": true, "heap_free": 120000, "heap_min": 90000, "stack_min": 800,
 		"reset": "power-on", "last_crash": "none", "stacks": map[string]any{}, "analog": true,
-		"safe_mode": false, "safe_reason": "", "caps": s.capsList(), "sensors_format": 1, "sensors_digital": true,
+		"safe_mode": false, "safe_reason": "", "sensors_digital": true,
+		"features_rev": featuresRev, "api": apiLevel, "min_client_api": minClientAPI,
+		"fpga_image": fpgaImageName(s.pod.image), "hw": podHW,
 	}
 	if !c.single {
 		out["adc_cal_a_uv"] = int64(math.Round(adcCalA * 1e6))
@@ -475,22 +519,6 @@ func (s *Sim) cloudState() string {
 
 func adcFullscaleMv() int64 { return int64(math.Round(math.Abs(adcCalB) * 32768 * 1000)) }
 
-// capsList is cloud_caps_emit_list for an analog board on the running gateware image.
-func (s *Sim) capsList() []string {
-	caps := []string{"signal", "gpio", "power", "swd", "uart", "la", "analyzer", "command",
-		"tunnel", "ota", "la_pins", "power_profile", "capture_b64", "can", "sensors", "usb_net",
-		"usb_net_setting", "lan_tls", "wifi_scan", "pod_current", "analog", "scope", "dac_limits", "calibrate",
-		"cal_dmm", "current_out", "dac", "dac_dc", "dac_replay"}
-	switch s.pod.image {
-	case 0:
-		caps = append(caps, "dac_control_loop")
-	case 1:
-		caps = append(caps, "dac_deep_replay")
-	}
-	return append(caps, "dac_cotrig", "generate16", "dac_loop_sources", "dac_loop_input_map", "gpio_read",
-		"capture_trigger", "spi_master", "spi_stream", "nrst_pin", "usb_cc")
-}
-
 // Capabilities is the firmware's capabilities frame (cloud_caps.c), without device_id and the
 // boot health the link side adds.
 func (s *Sim) Capabilities() map[string]any {
@@ -500,27 +528,24 @@ func (s *Sim) Capabilities() map[string]any {
 	if version == "" {
 		version = podFirmware
 	}
-	deep := s.pod.image == 1
 	maxSamples := 2048
-	if deep {
+	if s.pod.image == 1 {
 		maxSamples = 4 << 20
 	}
+	// Firmware 4.0.0 sends no per-feature flags: the server looks the features up from
+	// features_rev, the gateware, the image and the facts. What is left are values.
 	return map[string]any{
-		"firmware_version": version, "ota": true, "flash_kb": 2048, "blob_slots": true, "ota_sig": true,
-		"sig_policy": s.flash.sigPolicy, "sig_policy_cmd": true, "ws_auth_v2": true, "lease_state": true,
-		"cloud_ca": true, "cloud_proxy": true, "lan_policy": s.flash.lanPolicy, "lan_policy_cmd": true,
-		"tunnel_max_tier": true, "lan_tls": true, "wifi_scan": true, "serial": false, "scope": true, "analog": true,
-		"analyzer": true, "command": true, "tunnel": true, "adc_bits": 16, "adc_fullscale_mv": 4096, "adc_channels": 1,
+		"firmware_version": version, "flash_kb": 2048, "sig_policy": s.flash.sigPolicy, "ws_auth_v2": true,
+		"lan_policy": s.flash.lanPolicy, "features_rev": featuresRev, "api": apiLevel, "min_client_api": minClientAPI,
+		"gateware_version": podGateware, "fpga_image": fpgaImageName(s.pod.image),
+		"analog": true, "nrst_pin": true, "sensors_digital": true, "wifi_scan": true, "pod_current": true,
+		"adc_low_range": false, "adc_bits": 16, "adc_fullscale_mv": 4096, "adc_channels": 1,
 		"adc_cal_a_uv": int64(math.Round(adcCalA * 1e6)), "adc_cal_b_nv": int64(math.Round(adcCalB * 1e9)),
-		"adc_cal_unwrap": true, "adc_low_range": false, "adc_range": "normal", "adc_range_fs_mv": adcFullscaleMv(),
-		"dac": true, "dac_replay": true, "dac_dc": true, "dac_bits": 8, "dac_replay_bits": 16,
-		"dac_fullscale_mv": 4096, "dac_channels": 1, "dac_deep_replay": deep, "dac_replay_max_samples": maxSamples,
-		"dac_control_loop": s.pod.image == 0, "dac_loop_sources": true, "dac_loop_input_map": true, "dac_cotrig": true,
-		"generate_bits": 16, "la_pins": true, "gpio_read": true, "capture_trigger": true, "spi_master": true,
-		"spi_stream": true, "nrst_pin": true, "power_profile": true, "capture_b64": true, "dac_limits": true,
-		"calibrate": true, "cal_dmm": true, "can": true, "pod_current": true, "current_out": true,
-		"current_out_min_ua": currentOutUa(0), "current_out_max_ua": currentOutUa(0xFFFF), "sensors": true,
-		"sensors_format": 1, "sensors_digital": true, "board": podBoard, "uplink": "eth",
+		"adc_cal_unwrap": true, "adc_range": "normal", "adc_range_fs_mv": adcFullscaleMv(),
+		"dac_bits": 8, "dac_replay_bits": 16, "dac_fullscale_mv": 4096, "dac_channels": 1,
+		"dac_replay_max_samples": maxSamples, "generate_bits": 16, "la_max_rate_hz": 48000000,
+		"current_out_min_ua": currentOutUa(0), "current_out_max_ua": currentOutUa(0xFFFF),
+		"board": podBoard, "uplink": "eth",
 	}
 }
 

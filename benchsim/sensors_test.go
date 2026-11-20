@@ -123,7 +123,7 @@ func TestSensorStartChecks(t *testing.T) {
 		t.Fatalf("shared line owner: %v", o)
 	}
 	msg := refused(t, addr, map[string]any{"cmd": "sensor_start", "instance": "temp", "pins": map[string]any{"sda": 2, "scl": 3}})
-	if msg != `pin conflict: LA2 is in use by sensor:env (i2c_sda); stop the sensor emulation first ({"cmd":"sensor_stop","instance":"env"})` {
+	if msg != "BP0031 function=i2c_sda instance=env la=2 owner=sensor:env (i2c_sda)" {
 		t.Fatalf("conflict: %q", msg)
 	}
 	if msg := refused(t, addr, map[string]any{"cmd": "gpio", "la": 1, "mode": "output"}); !strings.Contains(msg, "sensor:env (i2c_scl)") {
@@ -266,12 +266,12 @@ func TestSensorUARTAndAnalog(t *testing.T) {
 	if v := out(); v > 1.2 {
 		t.Fatalf("60 degC: %v V", v)
 	}
-	msg := refused(t, addr, map[string]any{"cmd": "dac_out", "path": "3v3", "volts": 1})
+	msg := refused(t, addr, map[string]any{"cmd": "dac_out", "path": "3v3", "v": 1})
 	if msg != `the dac output is played by sensor:ntc; stop it first ({"cmd":"sensor_stop","instance":"ntc"})` {
 		t.Fatalf("dac_out: %q", msg)
 	}
 	ok(t, addr, map[string]any{"cmd": "dac_stop"})
-	ok(t, addr, map[string]any{"cmd": "dac_out", "path": "3v3", "volts": 1})
+	ok(t, addr, map[string]any{"cmd": "dac_out", "path": "3v3", "v": 1})
 }
 
 func TestSensorEmulationImage(t *testing.T) {

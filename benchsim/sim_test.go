@@ -3,10 +3,12 @@ package benchsim
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"math"
 	"net"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -26,8 +28,16 @@ func startSim(t *testing.T, opts ...Option) (*Sim, string) {
 }
 
 // frames sends one command on a fresh connection and reads reply lines until "more" is false.
+// It sends "client_api":2 as the 4.0 clients do, unless req has its own.
 func frames(t *testing.T, addr string, req map[string]any) []map[string]any {
 	t.Helper()
+	if _, has := req["client_api"]; !has {
+		withAPI := map[string]any{"client_api": 2}
+		for k, v := range req {
+			withAPI[k] = v
+		}
+		req = withAPI
+	}
 	c, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatal(err)
@@ -66,14 +76,32 @@ func ok(t *testing.T, addr string, req map[string]any) any {
 	return r["data"]
 }
 
-// refused sends a command that must fail and returns its message.
+// refused sends a command that must fail and returns its message, or for a coded refusal its
+// short form ("BP0031 la=4 owner=gpio", args sorted by key).
 func refused(t *testing.T, addr string, req map[string]any) string {
 	t.Helper()
 	r := frames(t, addr, req)[0]
 	if r["status"] != "error" {
 		t.Fatalf("%v: want an error, got %v", req, r)
 	}
+	if code, _ := r["code"].(string); code != "" {
+		return shortForm(code, r["args"])
+	}
 	return r["message"].(string)
+}
+
+func shortForm(code string, args any) string {
+	m, _ := args.(map[string]any)
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := code
+	for _, k := range keys {
+		out += fmt.Sprintf(" %s=%v", k, m[k])
+	}
+	return out
 }
 
 // console is a UART proxy session on the node's console.
@@ -90,7 +118,7 @@ func openConsole(t *testing.T, addr string) *console {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = c.Close() })
-	_, _ = c.Write([]byte(`{"cmd":"uart_proxy_start","rx":3,"tx":4,"baud":115200}` + "\n"))
+	_, _ = c.Write([]byte(`{"cmd":"uart_proxy_start","rx":3,"tx":4,"baud":115200,"client_api":2}` + "\n"))
 	ack := make([]byte, 0, 64)
 	one := make([]byte, 1)
 	for {
@@ -143,13 +171,14 @@ func TestStatusAndLaVoltage(t *testing.T) {
 	if st["version"] != podFirmware || st["board"] != podBoard {
 		t.Fatalf("status: %v", st)
 	}
-	if !strings.Contains(strings.Join(toStrings(st["caps"]), ","), "sensors") || st["sensors_format"] != 1.0 {
-		t.Fatalf("caps: %v", st["caps"])
+	if _, has := st["caps"]; has || st["api"] != 2.0 || st["min_client_api"] != 2.0 || st["features_rev"] != 11.0 ||
+		st["fpga_image"] != "loop" || st["sig_policy"] != "required" {
+		t.Fatalf("status levels: %v", st)
 	}
 	if ok(t, addr, map[string]any{"cmd": "ping"}) != "pong" {
 		t.Fatal("ping")
 	}
-	if msg := refused(t, addr, map[string]any{"cmd": "la_capture", "samples": 64}); !strings.HasPrefix(msg, "la voltage not set") {
+	if msg := refused(t, addr, map[string]any{"cmd": "la_capture", "samples": 64}); msg != "BP0001" {
 		t.Fatalf("la_capture before la_voltage: %s", msg)
 	}
 	if msg := refused(t, addr, map[string]any{"cmd": "la_voltage", "mv": 2500}); !strings.Contains(msg, "1800 or 3300") {
@@ -162,7 +191,7 @@ func TestStatusAndLaVoltage(t *testing.T) {
 	if msg := refused(t, addr, map[string]any{"cmd": "dap_start", "swclk": 11, "swdio": 12}); !strings.Contains(msg, "not available in the demo simulator") {
 		t.Fatal(msg)
 	}
-	if msg := refused(t, addr, map[string]any{"cmd": "frobnicate"}); msg != "unknown command: frobnicate" {
+	if msg := refused(t, addr, map[string]any{"cmd": "frobnicate"}); msg != "BP0002 cmd=frobnicate" {
 		t.Fatal(msg)
 	}
 }
@@ -180,7 +209,7 @@ func TestBootLogAndConsole(t *testing.T) {
 	_, addr := startSim(t, WithLaVoltage(3300))
 	k := openConsole(t, addr)
 	start := time.Now()
-	ok(t, addr, map[string]any{"cmd": "target_power", "efuse": 1, "state": 1})
+	ok(t, addr, map[string]any{"cmd": "target_power", "efuse": 1, "enabled": true})
 	boot := k.expect(`APP_OK\r\n`, 4*time.Second)
 	if d := time.Since(start); d < 900*time.Millisecond || d > 2*time.Second {
 		t.Errorf("APP_OK after %v, want about 1 s", d)
@@ -203,7 +232,7 @@ func TestBootLogAndConsole(t *testing.T) {
 	if mv := v["mv"].(float64); math.Abs(mv-1500) > 5 {
 		t.Errorf("adc_read of PA4 at 1500 mV: %v", v)
 	}
-	ok(t, addr, map[string]any{"cmd": "dac_out", "path": "3v3", "volts": 1.1})
+	ok(t, addr, map[string]any{"cmd": "dac_out", "path": "3v3", "v": 1.1})
 	time.Sleep(50 * time.Millisecond)
 	k.send("ain")
 	ain := k.expect(`AIN [^\r]*\r\n`, 2*time.Second)
@@ -219,7 +248,7 @@ func TestBootLogAndConsole(t *testing.T) {
 	k.expect(`APP_OK`, 2*time.Second)
 
 	// The console holds LA3/LA4: a GPIO claim on them is the firmware's pin conflict.
-	if msg := refused(t, addr, map[string]any{"cmd": "gpio", "la": 3, "mode": "output"}); !strings.HasPrefix(msg, "pin conflict: LA3 is in use by uart_rx") {
+	if msg := refused(t, addr, map[string]any{"cmd": "gpio", "la": 3, "mode": "output"}); msg != "BP0031 function=uart_rx instance= la=3 owner=uart_rx" {
 		t.Fatal(msg)
 	}
 }
@@ -299,13 +328,13 @@ func decodeUART(edges [][2]int, n, ch int, rate, baud float64) string {
 func TestLaCaptureShowsTheBootLog(t *testing.T) {
 	t.Parallel()
 	_, addr := startSim(t, WithLaVoltage(3300))
-	ok(t, addr, map[string]any{"cmd": "target_power", "efuse": 1, "state": 1, "delay_ms": 300})
-	fs := frames(t, addr, map[string]any{"cmd": "la_capture", "samples": 60000, "sample_rate_mhz": 2.0,
+	ok(t, addr, map[string]any{"cmd": "target_power", "efuse": 1, "enabled": true, "delay_ms": 300})
+	fs := frames(t, addr, map[string]any{"cmd": "la_capture", "samples": 60000, "sample_rate_hz": 2e6,
 		"trigger": map[string]any{"la": 3, "edge": "falling"}, "trigger_timeout_ms": 5000})
 	var edges [][2]int
 	n := 0
 	for _, f := range fs {
-		if f["la"] != true || f["la_rate_hz"].(float64) != 2e6 {
+		if f["la"] != true || f["la_sample_rate_hz"].(float64) != 2e6 {
 			t.Fatalf("frame: %v", f)
 		}
 		for _, e := range f["la_edges"].([]any) {
@@ -327,7 +356,7 @@ func TestTriggerTimeout(t *testing.T) {
 	_, addr := startSim(t, WithLaVoltage(3300))
 	msg := refused(t, addr, map[string]any{"cmd": "la_capture", "samples": 1000,
 		"trigger": map[string]any{"la": 9, "edge": "rising"}, "trigger_timeout_ms": 100})
-	if !regexp.MustCompile(`trigger timeout: no rising edge on LA9`).MatchString(msg) {
+	if msg != "BP0038 edge=rising la=9 timeout_ms=100" {
 		t.Fatal(msg)
 	}
 }
@@ -335,22 +364,26 @@ func TestTriggerTimeout(t *testing.T) {
 func TestPowerProfileAndAdcCapture(t *testing.T) {
 	t.Parallel()
 	_, addr := startSim(t, WithDUTPowered())
-	fs := frames(t, addr, map[string]any{"cmd": "power_profile", "efuse": 1, "rate_hz": 500, "keep_samples": 200, "duration_ms": 500})
+	fs := frames(t, addr, map[string]any{"cmd": "power_profile", "efuse": 1, "sample_rate_hz": 500, "keep_samples": 200, "duration_ms": 500})
 	stats := fs[len(fs)-1]["stats"].(map[string]any)
 	if avg := stats["avg_ua"].(float64); avg < 40000 || avg > 50000 {
 		t.Fatalf("idle current %v uA", avg)
 	}
-	if r := stats["rate_hz"].(float64); r < 360 || r > 370 {
+	if r := stats["sample_rate_hz"].(float64); r < 360 || r > 370 {
 		t.Fatalf("rate %v", r)
 	}
-	ok(t, addr, map[string]any{"cmd": "target_power", "efuse": 1, "state": 0})
-	fs = frames(t, addr, map[string]any{"cmd": "power_profile", "efuse": 1, "rate_hz": 200, "keep_samples": 0, "duration_ms": 200})
+	ok(t, addr, map[string]any{"cmd": "target_power", "efuse": 1, "enabled": false})
+	fs = frames(t, addr, map[string]any{"cmd": "power_profile", "efuse": 1, "sample_rate_hz": 200, "keep_samples": 0, "duration_ms": 200})
 	if avg := fs[len(fs)-1]["stats"].(map[string]any)["avg_ua"].(float64); avg != 0 {
 		t.Fatalf("rail off draws %v uA", avg)
 	}
-	fs = frames(t, addr, map[string]any{"cmd": "capture", "samples": 5000, "enc": "b64"})
-	if fs[0]["adc_rate_hz"].(float64) != adcMaxRateHz || fs[0]["b64"] == nil {
+	fs = frames(t, addr, map[string]any{"cmd": "capture", "samples": 5000})
+	if fs[0]["adc_sample_rate_hz"].(float64) != adcMaxRateHz || fs[0]["b64"] == nil || fs[0]["data"] != nil {
 		t.Fatalf("capture frame: %v", fs[0])
+	}
+	fs = frames(t, addr, map[string]any{"cmd": "capture", "samples": 100, "sample_rate_hz": 100000, "enc": "dec"})
+	if fs[0]["adc_sample_rate_hz"].(float64) != 100000 || fs[0]["b64"] != nil || len(fs[0]["data"].([]any)) == 0 {
+		t.Fatalf("decimal capture frame: %v", fs[0])
 	}
 }
 
@@ -394,7 +427,7 @@ func TestCloseEndsEveryConnection(t *testing.T) {
 	go func() {
 		c, err := net.Dial("tcp", addr)
 		if err == nil {
-			_, _ = c.Write([]byte(`{"cmd":"power_profile","efuse":1,"duration_ms":60000}` + "\n"))
+			_, _ = c.Write([]byte(`{"cmd":"power_profile","efuse":1,"duration_ms":60000,"client_api":2}` + "\n"))
 		}
 	}()
 	time.Sleep(200 * time.Millisecond)
