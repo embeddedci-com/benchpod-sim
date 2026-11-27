@@ -189,6 +189,7 @@ const (
 	codeTriggerTimeout       = 38
 	codeSamplesOutOfRange    = 67
 	codePsramTooSmall        = 72
+	codeRebootHardNotOnPod   = 93
 	codeLaNoPull             = 23
 	codeLaPullDirection      = 24
 )
@@ -378,5 +379,5 @@ var knownPodCommands = map[string]bool{
 	"spi_start": true,
 	"spi_stop":  true, "spi_xfer": true, "spi_stream": true, "spi_flash": true, "usb_network": true,
 	"lan_tls": true, "sig_policy": true, "lan_policy": true, "wifi_status": true, "dac_set": true,
-	"measure": true, "psram_recover": true, "cloud_config": true, "flash_self": true,
+	"measure": true, "reboot": true, "cloud_config": true, "flash_self": true,
 }

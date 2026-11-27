@@ -1003,11 +1003,24 @@ func (s *Sim) cmdFpgaImage(c *conn, r request) (any, error) {
 	return s.imageReply(), nil
 }
 
-func (s *Sim) cmdPsramRecover(request) (any, error) {
+// cmdReboot: "soft" (the default) answers {"reboot":"soft"} and resets the pod ~0.4 s later;
+// "hard" needs a power-cycle circuit no board has yet and is refused with BP0093.
+func (s *Sim) cmdReboot(_ *conn, r request) (any, error) {
+	mode := "soft"
+	if r.has("mode") {
+		m, ok := r["mode"].(string)
+		if !ok || (m != "soft" && m != "hard") {
+			return nil, errf("reboot: mode must be soft or hard")
+		}
+		mode = m
+	}
+	if mode == "hard" {
+		return nil, coded(codeRebootHardNotOnPod)
+	}
 	if s.hooks.Reboot != nil {
 		time.AfterFunc(400*time.Millisecond, s.hooks.Reboot)
 	}
-	return map[string]any{"recover": "rebooting"}, nil
+	return map[string]any{"reboot": "soft"}, nil
 }
 
 func (s *Sim) cmdPsramPing(c *conn, r request) (any, error) {
