@@ -75,7 +75,7 @@ type Hooks struct {
 	CapsChanged func()
 	// Logged reports a command that came over a stream connection: a tunnel, or the LAN port.
 	Logged func(req map[string]any, cloud bool, err error)
-	// Reboot resets the pod from a command (psram_recover).
+	// Reboot resets the pod from a command (reboot).
 	Reboot func()
 	// ProxyChanged reports a cloud_proxy set or clear: the link reconnects through it.
 	ProxyChanged func()

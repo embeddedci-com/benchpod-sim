@@ -258,3 +258,43 @@ func TestPolicies(t *testing.T) {
 		t.Fatalf("SCPI on: %q", line)
 	}
 }
+
+// reboot: soft (the default) answers {"reboot":"soft"} and resets the pod; hard is BP0093 on every
+// pod today; any other mode is a plain argument error; psram_recover is gone.
+func TestReboot(t *testing.T) {
+	rebooted := make(chan struct{}, 4)
+	s := New(WithFirmware("4.0.0", Hooks{Reboot: func() { rebooted <- struct{}{} }}))
+	defer s.Close()
+	exec := func(cmd map[string]any) Reply {
+		cmd["cmd"] = "reboot"
+		cmd["client_api"] = 2
+		return s.ExecReply(cmd, true)
+	}
+	for _, req := range []map[string]any{{}, {"mode": "soft"}} {
+		r := exec(req)
+		var d map[string]any
+		_ = json.Unmarshal(r.Data, &d)
+		if r.Error != "" || d["reboot"] != "soft" {
+			t.Fatalf("reboot %v: %+v", req, r)
+		}
+		select {
+		case <-rebooted:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("reboot %v: the pod did not reset", req)
+		}
+	}
+	if r := exec(map[string]any{"mode": "hard"}); r.Code != "BP0093" {
+		t.Fatalf("hard: %+v", r)
+	}
+	if r := exec(map[string]any{"mode": "warm"}); r.Error == "" || r.Code != "" {
+		t.Fatalf("bad mode: %+v", r)
+	}
+	select {
+	case <-rebooted:
+		t.Fatal("a refused reboot reset the pod")
+	case <-time.After(600 * time.Millisecond):
+	}
+	if r := s.ExecReply(map[string]any{"cmd": "psram_recover", "client_api": 2}, true); r.Code != "BP0002" {
+		t.Fatalf("psram_recover: %+v", r)
+	}
+}

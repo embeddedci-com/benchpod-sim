@@ -127,7 +127,7 @@ func init() {
 		"can_stop":              {1, flagNoHW, simple((*Sim).cmdCanStop), nil},
 		"speedtest":             {1, flagNoHW | flagStream, nil, nil},
 		"fpga_image":            {1, 0, (*Sim).cmdFpgaImage, nil},
-		"psram_recover":         {1, 0, simple((*Sim).cmdPsramRecover), nil},
+		"reboot":                {1, 0, (*Sim).cmdReboot, nil},
 		"wiring_put":            {1, flagNoHW, simple((*Sim).cmdWiringPut), nil},
 		"wiring_delete":         {1, flagNoHW, simple((*Sim).cmdWiringDelete), nil},
 		"wiring_default":        {1, flagNoHW, simple((*Sim).cmdWiringDefault), nil},
